@@ -1,0 +1,27 @@
+---
+targets:
+  - host: krtek.telephant.eu
+    afi: 4
+    name: krtek4
+  - host: krtek.telephant.eu
+    afi: 6
+    name: krtek6
+  - host: slon.telephant.eu
+    afi: 4
+    name: slon4
+  - host: slon.telephant.eu
+    afi: 6
+    name: slon6
+
+run:
+  - task: ping
+    repeat: infinite
+    delay: 1s
+  - task: traceroute
+    repeat: 10
+    delay: 60s
+
+telephant:
+  server: http://localhost:8080/api/v1/
+  token: randomtoken
+  group: telephant-dev

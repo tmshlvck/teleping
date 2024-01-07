@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "telephant"
+version = "0.1.0"
+description = "Network Engineer's best friend - Telephant"
+authors = ["Tomas Hlavacek <tmshlvck@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.6"
+click = "*"
+pyyaml = "*"
+requests = "*"
+scapy = "^2.5"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+telephant = "telephant:main"
