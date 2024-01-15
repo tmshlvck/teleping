@@ -29,9 +29,10 @@ class CircularBufferingHandler(logging.handlers.BufferingHandler):
 log = logging.getLogger()
 log.setLevel(logging.DEBUG)
 buffering_handler = CircularBufferingHandler(capacity=LOG_BUFFER_MAX_MSGS)
-#log.addHandler(buffering_handler)
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 
 import sys
+import os
 import subprocess
 import shutil
 import traceback
@@ -247,7 +248,7 @@ class TelephantState:
     def load_config(self):
         config = {}
         try:
-            with open(self.config_file, 'r') as cfd:
+            with open(os.path.expanduser(self.config_file), 'r') as cfd:
                 config = yaml.load(cfd, Loader=yaml.Loader)
         except Exception as e:
             logging.exception("Config file load failed. Continuing with defaults.")
@@ -334,26 +335,27 @@ def _ui_displayloop(state: TelephantState, freq: int =1):
         while not state.stop.isSet():
             if state.display_log:
                 table = Table(title="Logs", expand=True, row_styles=["dim", ""], show_edge=False, show_header=False)
-                table.add_column("Time", style="white", no_wrap=True)
+                #table.add_column("Time", style="white", no_wrap=True)
                 table.add_column("Log message", style="white", no_wrap=False)
                 for l in buffering_handler.buffer:
-                    table.add_row(str(datetime.datetime.fromtimestamp(l.created).astimezone()), str(l.msg))
+                    table.add_row(formatter.format(l))
 
             else:
                 table = Table(title="UDPPing", expand=True, row_styles=["dim", ""], show_edge=False)
-                table.add_column("Peer", style="cyan")
-                table.add_column("Tx", style="green")
-                table.add_column("RespRx", style="green")
-                table.add_column("RTT (ms)", style="green")
-                table.add_column("OutOfOrder", style="red")
-                table.add_column("CorruptRx", style="magenta")
-                table.add_column("PingRx", style="blue")
+                table.add_column("Peer")
+                table.add_column("Tx")
+                table.add_column("Rx")
+                table.add_column("RTT (ms)")
+                table.add_column("Lost OoO Crpt")
+                table.add_column("PingRx")
                 #table.add_column("Status", justify="right", style="magenta")
                 
                 if state.udpping:
-                    for name, ip, ping_sent, pong_recv, rtt, outoforder_recv, corrupt_recv, ping_recv, alarm in state.udpping.get_ui_rows(state.display_scroll, console.size.height - 4):
-                        table.add_row(('❌ ' if alarm else '✅ ') + name + ' ' + str(ip), ping_sent, pong_recv, rtt, outoforder_recv, corrupt_recv, ping_recv)
-                        
+                    for name, ip, ping_sent, pong_recv, rtt, loss, outoforder_recv, corrupt_recv, ping_rx_total, alarm in state.udpping.get_ui_rows(state.display_scroll, console.size.height - 4):
+                        if alarm:
+                            table.add_row(name + ' ' + str(ip), ping_sent, pong_recv, rtt, f"{loss} {outoforder_recv} {corrupt_recv}", f"{ping_rx_total}", style="red")
+                        else:
+                            table.add_row(name + ' ' + str(ip), ping_sent, pong_recv, rtt, f"{loss} {outoforder_recv} {corrupt_recv}", f"{ping_rx_total}")
             
             layout["upper"].update(table)
 
@@ -464,7 +466,7 @@ def main(config_file: str, cmdline_tgts: List[str], enable_ui: bool =True):
         lfh = logging.FileHandler(state.config.get('log_file'))
         if state.config.get('debug', False):
             lfh.setLevel(logging.DEBUG)
-        lfh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        lfh.setFormatter(formatter)
         log.addHandler(lfh)
 
     reconfig(state)

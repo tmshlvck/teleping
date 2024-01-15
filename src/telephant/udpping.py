@@ -42,6 +42,10 @@ def last_tsv(d: List[Tuple[float, int|float]], divide: float=1):
 
 
 def percent(a: int|float, b:int|float):
+    if b == 0:
+        logging.error(f"Can not compute percentage {a} / {b}")
+        return 0
+
     p = 100*a/b
     # fix possible rounding errors
     if p > 100:
@@ -59,7 +63,7 @@ def humanize_ip(ip):
         return str(ip)
 
 def report_ts(sum):
-    return [{'timestamp':t, time_local: datetime.datetime.fromtimestamp(t).astimezone(), 'value': v} for t,v in sum]
+    return [{'timestamp':t, 'time_local': datetime.datetime.fromtimestamp(t).astimezone(), 'value': v} for t,v in sum]
 
 class CounterUnsafe:
     dpts: List[int] # [datapoint,]
@@ -311,8 +315,8 @@ class UDPPingHostData:
         return False
     
     def get_ui_row(self):
-        "return (name:str, ip:str, xxxxxxxxxx, pong_recv:str, rtt:str, outoforder_recv:str, corrupt_recv:str, ping_recv: str, alarm: bool)"
-        return (self.name, humanize_ip(self.ip), self.ts_ping_sent.get_printable(), self.ts_pong_recv.get_printable(), self.ts_rtt.get_printable(), self.ts_outoforder_recv.get_printable(), self.ts_corrupt_recv.get_printable(), self.ts_ping_recv.get_printable(), self.is_alarm())
+        "return (name:str, ip:str, ping_sent: int, pong_recv:str, rtt:str, loss_total: int, outoforder_total:int, corrupt_total:int, ping_recv: str, alarm: bool)"
+        return (self.name, humanize_ip(self.ip), self.ts_ping_sent.get_printable(), self.ts_pong_recv.get_printable(), self.ts_rtt.get_printable(), self.ts_lost.total, self.ts_outoforder_recv.total, self.ts_corrupt_recv.total, self.ts_ping_recv.total, self.is_alarm())
         
     def get_prometheus_metrics(self):
         tags = {'peerip':self.ip,'peer':self.name,'proto':self.proto}
@@ -485,9 +489,9 @@ class UDPPing:
             raise
 
     def _initiator_loop(self):
-        try:
-            logging.debug("_initiator_loop up")
-            while not self.stop.isSet():
+        logging.debug("_initiator_loop up")
+        while not self.stop.isSet():
+            try:
                 with self.lock:
                     for dip in self.targets:
                         if not dip in self.status:
@@ -501,9 +505,12 @@ class UDPPing:
                         self.status[dip].sent_ping(txtime, pktid, self.txlen)
 
                 time.sleep(self.interval)
-        except:
-            logging.exception("_initiator_loop exception:")
-            raise
+            except OSError:
+                logging.exception("_initiator_loop will recover in 5 sec from exception:")
+                time.sleep(5)
+            except:
+                logging.exception("_initiator_loop exception:")
+                raise
 
     def _periodic_loop(self):
         try:
@@ -511,10 +518,6 @@ class UDPPing:
             last_t = time.time()
             while not self.stop.isSet():
                 time.sleep(1)
-                if time.time() < last_t + self.STATS_INTERVAL_SEC:
-                    continue
-                else:
-                    last_t = time.time()
 
                 t = time.perf_counter()
                 remove_pktids = []
@@ -527,7 +530,12 @@ class UDPPing:
                              remove_pktids.append(pktid)
                     for rpktid in remove_pktids:
                         self.pending.pop(rpktid, None)
-
+                    
+                    if time.time() < last_t + self.STATS_INTERVAL_SEC:
+                        continue
+                    else:
+                        last_t = time.time()
+                    # run the rest only every STATS_INTERVAL_SEC
                     for s in self.status:
                         if self.status[s].update_stats():
                             remove_stats.append(s)
