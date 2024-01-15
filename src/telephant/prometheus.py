@@ -1,6 +1,6 @@
 # coding: utf-8
 """
-UDPDrill
+Telephant Prometheus exporter
 Based on The UDP Smoke - fast UDP ping that gathers statistics
 
 Copyright (C) 2021-2023 Tomas Hlavacek (tmshlvck@gmail.com)
@@ -36,11 +36,12 @@ import socketserver
 import http
 import http.server
 import sys
+from typing import Dict
 
 # Prometheus minimalistic server
 
 class Counter:
-  def __init__(self, name, value, labels):
+  def __init__(self, name: str, value: int, labels: Dict[str,str]):
     self.name = name
     self.value = value
     self.labels = labels
@@ -61,6 +62,27 @@ class Counter:
 
     return ret.encode()
 
+class Gauge:
+  def __init__(self, name: str, value: int, labels: Dict[str,str]):
+    self.name = name
+    self.value = value
+    self.labels = labels
+
+  def render(self, namespace):
+    mn = f"{namespace}_{self.name}"
+    ret = ''
+    # help
+    ret += f"# HELP {mn} metric {self.name}\n"
+    ret += f"# TYPE {mn} gauge\n"
+
+    rlabels = ''
+    for l in self.labels:
+      if rlabels:
+        rlabels+=','
+      rlabels += f'{l}="{self.labels[l]}"'
+    ret += f'{mn}{{{rlabels}}} {self.value}\n'
+
+    return ret.encode()
 
 class Summary:
   def __init__(self, name, summ, count, labels, quantiles=None):
@@ -92,3 +114,38 @@ class Summary:
 
     return ret.encode()
 
+def server_loop(get_metrics, namespace:str, listen: str, port: int):
+  class PrometheusHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+      try:
+        self.send_response(http.HTTPStatus.OK)
+        self.end_headers()
+        for m in get_metrics():
+          self.wfile.write(m.render(namespace))
+      except:
+        logging.exception("do_GET exception")
+        raise
+
+    def log_request(self, code='-', size='-'):
+      if isinstance(code, http.HTTPStatus):
+        code = code.value
+      logging.info(f'prometheus scrape: "{self.requestline}" {code} {size}')
+
+
+  class TCP6Server(socketserver.TCPServer):
+    def server_bind(self):
+        """Called by constructor to bind the socket.
+        May be overridden.
+        """
+        if self.allow_reuse_address:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+
+    allow_reuse_address = True
+    address_family = socket.AF_INET6
+
+  httpd = TCP6Server((listen, port), PrometheusHandler)
+  httpd.serve_forever()
+  

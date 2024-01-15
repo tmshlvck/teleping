@@ -1,4 +1,7 @@
 ---
+log_file: debug.log
+debug: true
+
 targets:
   - host: krtek.telephant.eu
     afi: 4
@@ -13,12 +16,22 @@ targets:
     afi: 6
     name: slon6
 
-run:
-  - task: udpping
-    repeat: 600
-    delay: 1s
+#emit_basic_report_and_exit: false
+udpping:
+  bind_address: "::" # this must be IPv6 or IPv4-mapeed address; i.e. ::FFFF:192.168.1.1
+  port: 9511
+  interval: 1
 
 telephant:
-  server: http://hroch.d.telephant.eu:8080/api/v1/
-  token: ozzNALd6tI0HNyza4Vh4D8OEbl2qcOX3
+  server: https://www.telephant.eu/api/v1/
+  token: SUPERSECRETTOKEN
   group: 1
+#  auto_report:
+#    - loss_greater: "10%"
+#      loss_duration: 60
+#      wait_after: 3600
+
+prometheus_exporter:
+  listen: '::'
+  port: 9123
+
