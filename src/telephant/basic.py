@@ -472,7 +472,7 @@ def main(config_file: str, cmdline_tgts: List[str], enable_ui: bool =True):
     reconfig(state)
 
     t_prom = threading.Thread(target=telephant.prometheus.server_loop, args=(state.get_prometheus_metrics, "telephant", state.config.get('prometheus_exporter',{}).get('listen','::'),
-                                                                             state.config.get('prometheus_exporter',{}).get('port','9123')))
+                                                                             int(state.config.get('prometheus_exporter',{}).get('port',9123))))
     t_prom.daemon = True
     t_prom.start()
 
@@ -489,6 +489,10 @@ def main(config_file: str, cmdline_tgts: List[str], enable_ui: bool =True):
         t_keyloop.join()
         logging.debug("t_keyloop joined")
     else:
+        chandler = logging.StreamHandler(sys.stdout)
+        chandler.setLevel(logging.DEBUG)
+        chandler.setFormatter(formatter)
+        log.addHandler(chandler)
         logging.debug("Running in batch mode")
         try:
             while True:
