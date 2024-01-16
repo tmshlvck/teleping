@@ -435,8 +435,10 @@ def _ui_keyloop(state: TelephantState):
                     rr = telephant_emit_report(state.config, state.udpping.get_report())
                 else:
                     rr = telephant_emit_report(state.config, {})
-                if 'report_url' in rr:
+                if rr and 'report_url' in rr:
                     state.state = f"Report: {rr['report_url']}"
+                else:
+                    state.state = 'Report failed. See log!'
                 logging.debug(f"Report sent: {str(rr)}")
             elif k == 'u''':
                 if state.display_scroll > 0:
