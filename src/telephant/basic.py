@@ -230,7 +230,7 @@ class TelephantState:
 
     __slots__ = tuple(__annotations__)
 
-    STATE_HELP = "q:Quit u:up d:down c:reConfig r:send Report l:show Logs"
+    STATE_HELP = "q:Quit u:up d:down c:reConfig r:send Report l: Logs +/-: TxLen+/-"
 
     def __init__(self, config_file: str, cmdline_tgts: List[str]):
         self.config_file = config_file
@@ -388,6 +388,8 @@ def reconfig(state: TelephantState):
             state.udpping = telephant.udpping.UDPPing(listen_ipaddr=state.config.get('udpping', {}).get("bind_address", "::"),
                                                   port=state.config.get('udpping', {}).get("port", 9511),
                                                   interval=state.config.get('udpping', {}).get("interval", 1))
+            if state.config.get('udpping',{}).get('tx_length'):
+                state.udpping.set_txlen(int(state.config['udpping']['tx_length']))
             state.udpping.start()
         
         state.udpping.set_targets({t['ipaddress']: t['name'] for t in state.config['targets']})
@@ -428,6 +430,14 @@ def _ui_keyloop(state: TelephantState):
             elif k == 'x':
                 state.state = "Test test test!!!"
                 logging.debug("TEst Test test")
+            elif k == '+':
+                if state.udpping:
+                    state.udpping.txlen += 1
+                    logging.debug(f"Tx Len set {state.udpping.txlen}")
+            elif k == '-':
+                if state.udpping:
+                    state.udpping.txlen -= 1
+                    logging.debug(f"Tx Len set {state.udpping.txlen}")
             elif k == 'r':
                 state.state = "Sending report..."
                 logging.debug("Report send triggered by keyboard")

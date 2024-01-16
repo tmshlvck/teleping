@@ -337,8 +337,6 @@ class UDPPingHostData:
 class UDPPing:
     STATS_INTERVAL_SEC = 15
     DEFAULT_PKT_LEN = 100
-    IPUDP_LEN = 28
-    IP6UDP_LEN = 48
 
     HEADER = struct.Struct('!cxxxQII') # [type: byte, pad, pad, pad, pktid: ulonglong, len: uint]
     MAX_PKTID = (2**64)-1
@@ -391,7 +389,6 @@ class UDPPing:
 
     targets: Dict[str,str] # { ipaddresses : name }
     interval: float
-    max_packet_len: int
 
     t_recv: threading.Thread =None
     t_initiator: threading.Thread =None
@@ -399,7 +396,7 @@ class UDPPing:
     t_periodic: threading.Thread =None
 
 
-    def __init__(self, listen_ipaddr: str, port: int, interval: float =0.2, max_packet_len: int= 1500, timeout_sec: float =5):
+    def __init__(self, listen_ipaddr: str, port: int, interval: float =0.2, timeout_sec: float =5):
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.recvqueue = queue.Queue()
@@ -410,7 +407,6 @@ class UDPPing:
         self.last_pktid = 0
         self.targets = {}
         self.interval = interval
-        self.max_packet_len = max_packet_len
         self.timeout_sec = timeout_sec
         self.txlen = self.DEFAULT_PKT_LEN
 
@@ -425,6 +421,9 @@ class UDPPing:
                 else:
                     self.targets[str(t)] = tgts[t]
 
+
+    def set_txlen(self, txlen=100):
+        self.txlen = txlen
 
     def _gen_pktid_unsafe(self):
         self.last_pktid += 1
@@ -597,7 +596,7 @@ class UDPPing:
     
     def get_report(self):
         with self.lock:
-            return {'udpping': [self.status[s].get_report_data() for s in self.status]}
+            return {'udpping': {'results' : [self.status[s].get_report_data() for s in self.status], 'tx_data_length_bytes' : self.txlen, 'tx_gap_sec' : self.interval}}
     
     def get_prometheus_metrics(self):
         m = []
