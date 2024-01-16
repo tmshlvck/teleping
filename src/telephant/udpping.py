@@ -484,6 +484,8 @@ class UDPPing:
                         self.status[sip].recv_pong(rtime, pktid, sip, sport, txip, txtime)
                     else:
                         self.status[sip].recv_malformed(rtime, sip, sport)
+
+                self.recvqueue.task_done()
         except:
             logging.exception("_pkt_processor_loop exception:")
             raise
