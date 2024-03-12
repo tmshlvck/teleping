@@ -338,7 +338,7 @@ class UDPPing:
     STATS_INTERVAL_SEC = 15
     DEFAULT_PKT_LEN = 100
 
-    HEADER = struct.Struct('!cxxxQII') # [type: byte, pad, pad, pad, pktid: ulonglong, len: uint]
+    HEADER = struct.Struct('!cxxxQII') # [type: byte, pad, pad, pad, pktid: ulonglong, len: uint, csum: uint]
     MAX_PKTID = (2**64)-1
     PKT_TYPE_PING = b'P'
     PKT_TYPE_PONG = b'R'
@@ -596,7 +596,7 @@ class UDPPing:
     
     def get_report(self):
         with self.lock:
-            return {'udpping': {'results' : [self.status[s].get_report_data() for s in self.status], 'tx_data_length_bytes' : self.txlen, 'tx_gap_sec' : self.interval}}
+            return {'udpping': {'results' : [self.status[s].get_report_data() for s in self.status], 'tx_data_length_bytes' : self.txlen+self.HEADER.size, 'tx_gap_sec' : self.interval}}
     
     def get_prometheus_metrics(self):
         m = []

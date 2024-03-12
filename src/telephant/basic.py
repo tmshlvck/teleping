@@ -301,10 +301,7 @@ class TelephantState:
         return (datetime.datetime.now() - self.starttime).total_seconds()
     
     def format_state(self):
-        if self.state:
-            return f"run: {self.elapsed_str()} | [bold]{self.state}[/bold] | {self.STATE_HELP}"
-        else:
-            return f"run: {self.elapsed_str()} | --- | {self.STATE_HELP}"
+        return f"{self.elapsed_str()} | Tx {self.udpping.txlen+self.udpping.HEADER.size if self.udpping else '-'}B | [bold]{self.state if self.state else '---'}[/bold] | {self.STATE_HELP}"
         
     def get_prometheus_metrics(self):
         m = [telephant.prometheus.Counter('runtime', self.elapsed_sec(), {})]
