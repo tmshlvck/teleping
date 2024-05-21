@@ -4,16 +4,42 @@
 import click
 import sys
 import os
+import logging
 
-import telephant.basic
+from telephant.common import TelephantCore
+from telephant.udpping import UDPPing
+from telephant.webui import start_webui
+
+from prometheus_client.core import REGISTRY
 
 
 @click.command("Telephant is your best friend")
-@click.option('-c', '--config', 'config_file', default=os.environ.get('TELEPHANT_CONFIG','~/.telephant.yml'), help="ovrride TELEPHANT_CONFIG env or defult ~/.telephant.yml")
-@click.option('-t', '--target', 'tgts', multiple=True, help="target IP or hostname")
-@click.option('-d', '--daemon', 'daemon', is_flag=True, help="disable Rich UI, output log to console")
-def main(config_file, tgts, daemon):
-    telephant.basic.main(config_file, tgts, not daemon)
+@click.option('-c', '--config', 'config_file', default=os.environ.get('TELEPHANT_CONFIG','~/.telephant.yml'), help="override TELEPHANT_CONFIG env or defult ~/.telephant.yml")
+@click.option('-d', '--debug', 'debug', is_flag=True, help="Enable debugging log messages")
+def main(config_file, debug):
+    tc = TelephantCore(os.path.expanduser(config_file))
+    if debug:
+        tc.cfg.debug = True
 
+    if tc.cfg.log_file:
+        logging.basicConfig(level=(logging.DEBUG if tc.cfg.debug else logging.INFO),
+                            format='%(asctime)s %(levelname)s %(message)s',
+                            filename=tc.cfg.log_file)
+    else:
+        logging.basicConfig(level=(logging.DEBUG if tc.cfg.debug else logging.INFO),
+                            format='%(asctime)s %(levelname)s %(message)s')
+
+    logging.info("Config read, logging initialized, starting udp responder.")
+    tc.udpping = UDPPing()
+    tc.udpping.start(tc.cfg.udpping.bind_address4, tc.cfg.udpping.bind_address6, tc.cfg.udpping.port, tc.cfg.udpping.interval)
+    tc.udpping.set_targets([t.addr for t in tc.cfg.normalized_targets])
+
+    logging.info("Starting Prometheus")
+    REGISTRY.register(tc.udpping)
+
+    logging.info("Starting web ui.")
+    start_webui(tc)
+    
+    
 if __name__ == '__main__':
     sys.exit(main())

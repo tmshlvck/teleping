@@ -1,0 +1,77 @@
+{% macro formbody(elements) -%}
+{% for fe in elements %}
+{% if fe.element == "fieldset" %}
+    <fieldset id="{{ fe.id }}" class="mb-3">
+        <legend>{{ fe.label }}</legend>
+        {{ formbody(fe.subelements) }}
+    </fieldset>
+{% elif fe.element == "input" %}
+{% if fe.label != None %}
+    <label for="{{ fe.name }}" class="form-label">{{ fe.label }}</label><br>
+{% endif %}
+    <input type="{{ fe.input_type }}" id="{{ fe.id }}" name="{{ fe.name }}" class="form-control{% if fe.error %} is-invalid{% endif %}" value="{% if fe.value %}{{ fe.value }}{% endif %}"{% if fe.disabled %} readonly{% endif %}>
+    <div id="{{ fe.id }}_descr" class="fw-light fst-italic">{% if fe.description %}{{ fe.description }}{% endif %}</div>
+    <div id="{{ fe.id }}_error" class="invalid-feedback">{% if fe.error %}{{ fe.error }}{% endif %}</div>
+    <br>
+{% elif fe.element == "inputdel" %}
+    <div class="input-group">
+        <input type="{{ fe.input_type }}" id="{{ fe.id }}" name="{{ fe.name }}" class="form-control{% if fe.error %} is-invalid{% endif %}" value="{% if fe.value %}{{ fe.value }}{% endif %}"{% if fe.disabled %} readonly{% endif %}>
+        <button type="button" id="{{ fe.id }}_del" class="btn btn-outline-danger" hx-post="{{ fe.url }}" hx-target="#wcform" hx-swap="outerHTML"{% if fe.disabled %} disabled{% endif %}>
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16">
+          <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
+          <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>
+        </svg>
+        </button>
+    </div>
+{% elif fe.element == "select" %}
+{% if fe.label != None %}
+    <label for="{{ fe.name }}" class="form-label">{{ fe.label }}</label><br>
+{% endif %}
+    <select id="{{ fe.id }}" name="{{ fe.name }}" class="form-select{% if fe.error %} is-invalid{% endif %}"{% if fe.disabled %} readonly{% endif %}>
+{% for o in fe.options %}
+        <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.name }}</option>
+{% endfor %}
+    </select>
+    <div id="{{ fe.id }}_descr" class="fw-light fst-italic">{% if fe.description %}{{ fe.description }}{% endif %}</div>
+    <div id="{{ fe.id }}_error" class="invalid-feedback">{% if fe.error %}{{ fe.error }}{% endif %}</div>
+    <br>
+{% elif fe.element == "switch" %}
+    <div class="form-check form-switch my-4 mx-3">
+        <input id="{{ fe.id }}" name="{{ fe.name }}" class="form-check-input{% if fe.error %} is-invalid{% endif %}" style="transform: scale(1.8);" type="checkbox" role="switch"{% if fe.disabled %} readonly{% endif %}{% if fe.value %} checked{% endif %}>
+        <label class="form-check-label mx-4" for="{{ fe.name }}">{{ fe.label }}</label>
+    </div>
+    <div id="{{ fe.id }}_descr" class="fw-light fst-italic">{% if fe.description %}{{ fe.description }}{% endif %}</div>
+    <div id="{{ fe.id }}_error" class="invalid-feedback">{% if fe.error %}{{ fe.error }}{% endif %}</div>
+    <br>
+{% elif fe.element == "button" %}
+    <button type="button" id="{{ fe.id }}" class="btn btn-primary" hx-post="{{ fe.url }}" hx-target="#wcform" hx-swap="outerHTML"{% if fe.disabled %} disabled{% endif %}>{{ fe.label }}</button>
+    <br>
+{% elif fe.element == "delbutton" %}
+    <button type="button" id="{{ fe.id }}" class="btn btn-outline-danger" hx-post="{{ fe.url }}" hx-target="#wcform" hx-swap="outerHTML"{% if fe.disabled %} disabled{% endif %}>
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16">
+          <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
+          <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>
+        </svg>
+    </button>
+    <br>
+{% elif fe.element == "textarea" %}
+{% if fe.label != None %}
+    <label for="{{ fe.name }}" class="form-label">{{ fe.label }}</label><br>
+{% endif %}
+    <textarea id="{{ fe.id }}" name="{{ fe.name }}" class="form-control{% if fe.error %} is-invalid{% endif %}" rows="{{ fe.rows }}" cols="{{ fe.cols }}"{% if fe.disabled %} readonly{% endif %}>
+{% if fe.value %}{{ fe.value }}{% endif %}
+    </textarea>
+    <div id="{{ fe.id }}_descr" class="fw-light fst-italic">{% if fe.description %}{{ fe.description }}{% endif %}</div>
+    <div id="{{ fe.id }}_error" class="invalid-feedback">{% if fe.error %}{{ fe.error }}{% endif %}</div>
+    <br>
+{% endif %}
+{% endfor %}
+{%- endmacro %}
+
+<div id="wcform" class="col-12 col-md-8 mb-3">
+    <form>
+{{ formbody(form_elements) }}
+        <button type="button" id="submit" class="btn btn-primary" hx-post="{{ form_submit_url }}" hx-target="#wcform" hx-swap="outerHTML">Save</button>
+        <button type="button" id="submit" class="btn btn-outline-danger" hx-get="{{ form_return_url }}" hx-target="#wcform" hx-swap="outerHTML">Cancel</button>
+    </form>
+</div>

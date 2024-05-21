@@ -1,6 +1,6 @@
 ---
-log_file: debug.log
-debug: true
+#log_file: debug.log
+debug: false
 
 targets:
   - host: krtek.telephant.eu
@@ -15,21 +15,19 @@ targets:
   - host: slon.telephant.eu
     afi: 6
     name: slon6
+  - host: localhost
+    afi: 4
+    name: localhost4
 
-#emit_basic_report_and_exit: false
 udpping:
-  bind_address: "::" # this must be IPv6 or IPv4-mapeed address; i.e. ::FFFF:192.168.1.1
+  bind_address4: "0.0.0.0" # this must be IPv4 address; i.e. 192.168.1.1
+  bind_address6: "::" # this must be IPv6 address; i.e. 2001:db8::1
   port: 9511
   interval: 1
 
-telephant:
-  server: https://www.telephant.eu/api/v1/
-  token: SUPERSECRETTOKEN
-  group: 1
-#  auto_report:
-#    - loss_greater: "10%"
-#      loss_duration: 60
-#      wait_after: 3600
+control:
+  listen: '127.0.0.1'
+  port: 8081
 
 prometheus_exporter:
   listen: '::'

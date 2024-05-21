@@ -3,7 +3,7 @@
 UDPPing
 Based on The UDP Smoke - fast UDP ping that gathers statistics
 
-Copyright (C) 2021-2023 Tomas Hlavacek (tmshlvck@gmail.com)
+Copyright (C) 2021-2024 Tomas Hlavacek (tmshlvck@gmail.com)
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -16,332 +16,178 @@ You should have received a copy of the GNU General Public License along with
 this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
-
 import logging
-import time
-import datetime
+from typing import List, Dict, Tuple, Optional
 import struct
-import ipaddress
-import socket
-import threading
+from threading import Thread, Lock, Event
 import queue
+from ipaddress import IPv4Address, IPv6Address, ip_address
+from copy import deepcopy
+import socket
+import time
 import os
-import copy
-from typing import List, Dict, Tuple
+import math
+from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily
+from prometheus_client.registry import Collector
+from pydantic import BaseModel
 
-from telephant.prometheus import Counter,Summary
 
-def last_tsv(d: List[Tuple[float, int|float]], divide: float=1):
-    if len(d) > 0:
-        if isinstance(d[-1][1], float) or divide != 1:
-            return f"{(d[-1][1]/divide):.1f}"
+class PeerStats(BaseModel):
+    last_rx_time: float
+    total_tx_ping: int
+    total_rx_ping_ok: int
+    total_rx_ping_corrupt: int
+    total_rx_pong_ok: int
+    total_rx_pong_corrupt: int
+    total_rx_malformed: int
+    total_lost: int
+    rtt_avg15s_ms: Optional[float]
+
+
+class HostStats:
+    EXPIRY_THRESHOLD_SEC = 60
+
+    _afi: int
+    _active: bool
+    _interval_sec: float
+    _ping_timeout_sec: float
+
+    last_rx_time: float
+    total_tx_ping: int
+    total_rx_ping_ok: int
+    total_rx_ping_corrupt: int
+    total_rx_pong_ok: int
+    total_rx_pong_corrupt: int
+    total_rx_malformed: int
+    total_lost: int
+
+    _pending: Dict[int,float]
+
+    _rtt: List[float]
+    rtt_avg15s_ms: Optional[float]
+
+    __slots__ = tuple(__annotations__)
+
+    def __init__(self, afi: int, active: bool = False, ping_timeout_sec: float = 5, interval_sec: float = 1):
+        self._afi = afi
+        self._active = active
+        self._interval_sec = interval_sec
+        self._ping_timeout_sec = ping_timeout_sec
+        self.last_rx_time = 0
+        self.total_tx_ping = 0
+        self.total_rx_ping_ok = 0
+        self.total_rx_ping_corrupt = 0
+        self.total_rx_pong_ok = 0
+        self.total_rx_pong_corrupt = 0
+        self.total_rx_malformed = 0
+        self.total_lost = 0
+        self._pending = {}
+        self._rtt = []
+        self.rtt_avg15s_ms = None
+
+    @classmethod
+    def get_stats_list(cls) -> List[str]:
+        return [k for k in cls.__slots__ if not k.startswith('_')]
+
+    def to_dict(self) -> Dict[str,float|int]:
+        return {k:getattr(self, k) for k in self.get_stats_list()}
+    
+    def to_peer_stats(self) -> PeerStats:
+        return PeerStats(**(self.to_dict()))
+
+    def __repr__(self) -> str:
+        return f'{self.total_tx_ping=} {self.total_rx_pong_ok=} {self.total_rx_malformed=} {self.total_rx_malformed=}'
+
+    def is_expired(self) -> bool:
+        return (not self._active and (time.time() - self.last_rx_time) > self.EXPIRY_THRESHOLD_SEC) 
+
+    def ping_tx(self, txtime: float, pktid: int, txlen: int):
+        self.total_tx_ping += 1
+        self._pending[pktid] = txtime
+        #print(f"ping_tx {txtime=} {pktid=} {txlen=}")
+
+    def failed_tx(sefl, txtime: float, pktid: int):
+        pass
+
+    def ping_rx(self, rtime: float, payload_ok: bool):
+        self.last_rx_time = rtime
+        if payload_ok:
+            self.total_rx_ping_ok += 1
         else:
-            return str(d[-1][1])
-    else:
-        return "N/A"
+            self.total_rx_ping_corrupt += 1
+        #print(f"ping_rx {rtime=} {payload_ok=}")
 
-
-def percent(a: int|float, b:int|float):
-    if b == 0:
-        logging.error(f"Can not compute percentage {a} / {b}")
-        return 0
-
-    p = 100*a/b
-    # fix possible rounding errors
-    if p > 100:
-        return 100.0
-    elif p < 0:
-        return 0.0
-    else:
-        return p
-
-def humanize_ip(ip):
-    ipm = ipaddress.ip_address(ip).ipv4_mapped
-    if ipm:
-        return str(ipm)
-    else:
-        return str(ip)
-
-def report_ts(sum):
-    return [{'timestamp':t, 'time_local': datetime.datetime.fromtimestamp(t).astimezone(), 'value': v} for t,v in sum]
-
-class CounterUnsafe:
-    dpts: List[int] # [datapoint,]
-    sum_15s: List[Tuple[float,float]] # [(timestamp, datapoint),]
-    sum_5m: List[Tuple[float,float]] # [(timestamp, datapoint),]
-    total: int
-    keep_15s: int
-    keep_5m: int
-
-    def __init__(self, keep_15s=240, keep_5m=8640):
-        self.dpts = []
-        self.sum_15s = []
-        self.sum_5m = []
-        self.total = 0
-        self.keep_15s = keep_15s
-        self.keep_5m = keep_5m
-
-    def record(self, value: int = 1):
-        self.dpts.append(value)
-        self.total += value
-
-    def aggregate(self, time: float):
-        self.sum_15s.append((time, sum(self.dpts)))
-        self.dpts = []
-
-        if len(self.sum_15s) >= 20 and self.sum_15s[-20][0] > (self.sum_5m[-1][0] if len(self.sum_5m) > 0 else 0):
-            self.sum_5m.append((time, sum([v for _,v in self.sum_15s[-20:]])))
-
-        if len(self.sum_15s) > self.keep_15s:
-            self.sum_15s = self.sum_15s[len(self.sum_15s)-self.keep_15s:]
-
-        if len(self.sum_5m) > self.keep_5m:
-            self.sum_5m = self.sum_5m[len(self.sum_5m)-self.keep_5m:]
-
-    def is_inactive(self):
-        for _,v in self.dpts:
-            if v > 0:
-                return False
-            
-        for _,v in self.sum_15s:
-            if v > 0:
-                return False
-
-        if len(self.sum_5m) > 24: # 2 hours
-            for _,v in self.sum_5m[-24:]:
-                if v > 0:
-                    return False
-        
-        return True
-
-    def get_prometheus_data(self, name: str, tags: Dict[str, str]):
-        return Counter(name, self.total, tags)
-    
-    def get_report_data(self, name: str, relate_to:'CounterUnsafe' = None):
-        """
-        Warning: This method returns encapsulated references to the objects, deep copy under lock protection is needed to avoid races
-        """
-        return {name: {'total': self.total, 'last_datapoints': self.dpts, 'sum_15sec': report_ts(self.sum_15s), 'sum_5min': report_ts(self.sum_5m)}}
-    
-    def get_printable(self, relate_to:'CounterUnsafe' = None):
-        return f'{self.total} {last_tsv(self.sum_15s, 15)}/s'
-
-class PercentCounterUnsafe(CounterUnsafe):
-    percent_15s: List[Tuple[float,float]] # [(timestamp, datapoint),]
-    percent_5m: List[Tuple[float,float]] # [(timestamp, datapoint),]
-    total_percent: float
-
-    def __init__(self, keep_15s=240, keep_5m=8640):
-        super().__init__(keep_15s, keep_5m)
-        self.percent_15s = []
-        self.percent_5m = []
-        self.total_percent = 0
-
-    def record(self, value: int = 1, relate_to: CounterUnsafe = None):
-        """
-        The relate_to counter has to be already aggregated for exactly the same time when this method is called !!!
-        """
-        self.dpts.append(value)
-        self.total += value
-        self.total_percent = percent(self.total, relate_to.total)
-
-    def aggregate(self, time: float, relate_to: CounterUnsafe = None):
-        """
-        The relate_to counter has to be already aggregated for exactly the same time when this method is called !!!
-        """
-        super().aggregate(time)
-
-        if len(self.sum_15s) > 0 and len(relate_to.sum_15s) > 0 and self.sum_15s[-1][0] == time and relate_to.sum_15s[-1][0] == time:
-            self.percent_15s.append((time, percent(self.sum_15s[-1][1], relate_to.sum_15s[-1][1])))
-
-        if len(self.sum_5m) > 0 and len(relate_to.sum_5m) > 0 and self.sum_5m[-1][0] == time and relate_to.sum_5m[-1][0] == time:
-            self.percent_5m.append((time, percent(self.sum_5m[-1][1], relate_to.sum_5m[-1][1])))
-
-        if len(self.percent_15s) > self.keep_15s:
-            self.percent_15s = self.percent_15s[len(self.percent_15s)-self.keep_15s:]
-
-        if len(self.percent_5m) > self.keep_5m:
-            self.percent_5m = self.percent_5m[len(self.percent_5m)-self.keep_5m:]
-
-    def get_report_data(self, name: str):
-        """
-        Warning: This method returns encapsulated references to the objects, deep copy under lock protection is needed to avoid races
-        """
-        return {name: {'total': self.total, 'total_percent': self.total_percent, 'last_datapoints': self.dpts, 'sum_15sec': report_ts(self.sum_15s),
-                       'percent_15sec': report_ts(self.percent_15s), 'sum_5min': report_ts(self.sum_5m), 'percent_5min': report_ts(self.percent_5m)}}
-    
-    def get_printable(self):
-        #return f'{last_tsv(self.sum_15s)} ({last_tsv(self.percent_15s)}%) {last_tsv(self.sum_5m)} ({last_tsv(self.percent_5m)}) {self.total} ({self.total_percent:.1f})'
-        return f'{self.total} ({self.total_percent:.1f} %) {last_tsv(self.sum_15s,15)}/s'
-
-class AvgSummaryUnsafe:
-    dpts: List[float|int] # [datapoint,]
-    dpts_roll: List[float|int] # [datapoint,]
-    avg_15s: List[Tuple[float,float]] # [(timestamp, datapoint),]
-    avg_5m: List[Tuple[float,float]] # [(timestamp, datapoint),]
-    avg_roll: float
-    keep_15s: int
-    keep_5m: int
-    dpts_count: int
-    dpts_sum: float|int
-
-    def __init__(self, keep_15s=240, keep_5m=8640, avg_roll_count=20):
-        self.dpts = []
-        self.dpts_roll = []
-        self.avg_15s = []
-        self.avg_5m = []
-        self.avg_roll = 0
-        self.keep_15s = keep_15s
-        self.keep_5m = keep_5m
-        self.avg_roll_count = avg_roll_count
-        self.dpts_count = 0
-        self.dpts_sum = 0
-
-    def record(self, value: float|int):
-        self.dpts.append(value)
-        self.dpts_count += 1
-        self.dpts_sum += value
-        self.dpts_roll.append(value)
-        if len(self.dpts_roll) > self.avg_roll_count:
-            self.avg_roll += (value - self.dpts_roll.pop(0))/self.avg_roll_count
+    def pong_rx(self, rtime: float, pktid: int, payload_ok: bool):
+        self.last_rx_time = rtime
+        if pktid in self._pending:
+            rtt = rtime*1000 - self._pending[pktid]*1000
+            self.rtt_update(rtt)
+            self._pending.pop(pktid)
         else:
-            self.avg_roll += value/self.avg_roll_count
-
-    def aggregate(self, time: float):
-        if len(self.dpts) == 0:
+            self.total_rx_pong_corrupt += 1
             return
 
-        self.avg_15s.append((time, sum(self.dpts)/len(self.dpts)))
-        self.dpts = []
-
-        if len(self.avg_15s) >= 20 and self.avg_15s[-20][0] > (self.avg_5m[-1][0] if len(self.avg_5m) > 0 else 0):
-            self.avg_5m.append((time, sum([v for _,v in self.avg_15s[-20:]])/20))
-
-        if len(self.avg_15s) > self.keep_15s:
-            self.avg_15s = self.avg_15s[len(self.avg_15s)-self.keep_15s:]
-
-        if len(self.avg_5m) > self.keep_5m:
-            self.avg_5m = self.avg_5m[len(self.avg_5m)-self.keep_5m:]
-
-    def get_prometheus_data(self, name: str, tags: Dict[str, str]):
-        return Summary(name, self.dpts_sum, self.dpts_count, tags)
-    
-    def get_report_data(self, name: str):
-        """
-        Warning: This method returns encapsulated references to the objects, deep copy under lock protection is needed to avoid races
-        """
-        return {name: {'last_rolling_avg': self.avg_roll, 'last_rolling_avg_datapoints': self.avg_roll_count, 'last_datapoints': self.dpts, 'avg_15sec': report_ts(self.avg_15s), 'avg_5min': report_ts(self.avg_5m)}}
-    
-    def get_printable(self):
-        return f'{self.avg_roll:.1f} {last_tsv(self.avg_15s)} {last_tsv(self.avg_5m)}'
-
-
-class UDPPingHostData:
-    KEEP_15s = 240 # 60 min
-    KEEP_5m = 8640 # 30 days
-
-    ip: str
-    name: str
-    proto: int
-
-    last_rx_pktid: int
-
-    ts_ping_sent: CounterUnsafe
-    ts_ping_recv: CounterUnsafe
-    ts_pong_recv: PercentCounterUnsafe
-    ts_corrupt_recv: PercentCounterUnsafe
-    ts_lost: PercentCounterUnsafe
-    ts_rtt: AvgSummaryUnsafe
-    ts_outoforder_recv: PercentCounterUnsafe
-
-    __slots__ = tuple(__annotations__)  
-    
-    def __init__(self, ip, name):
-        self.ip = ip
-        self.name = name
-        self.proto = 4 if ipaddress.ip_address(ip).ipv4_mapped else 6
-
-        self.last_rx_pktid = 0
-        self.ts_ping_sent = CounterUnsafe(self.KEEP_15s, self.KEEP_5m)
-        self.ts_ping_recv = CounterUnsafe(self.KEEP_15s, self.KEEP_5m)
-        self.ts_pong_recv = PercentCounterUnsafe(self.KEEP_15s, self.KEEP_5m)
-        self.ts_corrupt_recv = PercentCounterUnsafe(self.KEEP_15s, self.KEEP_5m)
-        self.ts_lost = PercentCounterUnsafe(self.KEEP_15s, self.KEEP_5m)
-        self.ts_rtt = AvgSummaryUnsafe(self.KEEP_15s, self.KEEP_5m)
-        self.ts_outoforder_recv = PercentCounterUnsafe(self.KEEP_15s, self.KEEP_5m)
-        
-
-    def sent_ping(self, ttime: float, pktid: int, txlen: int):
-        self.ts_ping_sent.record()
-
-    def recv_ping(self, rtime: float, pktid: int, sip: str, sport: int):
-        self.ts_ping_recv.record()
-
-    def recv_pong(self, rtime: float, pktid: int, sip: str, sport: int, txip: str, txtime: int):
-        self.ts_rtt.record(1000*(rtime - txtime))
-        self.ts_pong_recv.record(1, self.ts_ping_sent)
-        
-        if pktid < self.last_rx_pktid and (pktid + 100000) > self.last_rx_pktid:
-            logging.debug(f"OutOfOrder: pktid={pktid} last_rx_pktid={self.last_rx_pktid}")
-            self.ts_outoforder_recv.record(1, self.ts_ping_sent)
+        if payload_ok:
+            self.total_rx_pong_ok += 1
         else:
-            self.last_rx_pktid = pktid
+            self.total_rx_pong_corrupt += 1
+        #print(f"pong_rx {rtime=} {pktid=} {payload_ok=}")
 
-    def recv_malformed(self, rtime: float, sip: str, sport: int):
-        self.ts_corrupt_recv.record(1, self.ts_ping_sent)
+    def malformed_rx(self, rtime: float, exc: Exception):
+        self.last_rx_time = rtime
+        self.total_rx_malformed += 1
+        #print(f"malformed_rx {rtime=} {exc=}")
 
-    def timeout(self, pktid: int, tip: str):
-        self.ts_lost.record(1, self.ts_ping_sent)
+    def rtt_update(self, rtt):
+        hsize = math.ceil(float(15)/self._interval_sec)
+        if hsize == 1:
+            self.rtt_avg15s_ms = rtt
+            return
 
-    def update_stats(self) -> bool: # return whether the object should be cleared (saw only zeros for long time in all vital counters)
+        if self.rtt_avg15s_ms == None:
+            self.rtt_avg15s_ms = rtt
+            self._rtt = [(rtt / hsize)] * hsize
+
+        norm_rtt = rtt / hsize
+        self.rtt_avg15s_ms += norm_rtt
+        self._rtt.append(norm_rtt)
+
+        self.rtt_avg15s_ms -= self._rtt.pop(0)
+
+    def periodic_update(self):
         t = time.time()
-        self.ts_ping_sent.aggregate(t)
-        self.ts_ping_recv.aggregate(t)
-        self.ts_pong_recv.aggregate(t, self.ts_ping_sent)
-        self.ts_corrupt_recv.aggregate(t, self.ts_ping_sent)
-        self.ts_lost.aggregate(t, self.ts_ping_sent)
-        self.ts_rtt.aggregate(t)
-        self.ts_outoforder_recv.aggregate(t, self.ts_ping_sent)
-        
-        return self.ts_ping_sent.is_inactive() and self.ts_ping_recv.is_inactive() and self.ts_pong_recv.is_inactive() and self.ts_corrupt_recv.is_inactive()
-        
-    def is_alarm(self) -> bool:
-        if len(self.ts_lost.sum_15s) > 0 and self.ts_lost.sum_15s[-1][1] > 0:
-            return True
-        if len(self.ts_outoforder_recv.sum_15s) > 0 and self.ts_outoforder_recv.sum_15s[-1][1] > 0:
-            return True
-        if len(self.ts_corrupt_recv.sum_15s) > 0 and self.ts_corrupt_recv.sum_15s[-1][1] > 0:
-            return True
-        return False
+        to_delete = []
+        for p in self._pending:
+            if t - self._pending[p] > self._ping_timeout_sec:
+                to_delete.append(p)
+        for p in to_delete:
+            self._pending.pop(p)
+            self.total_lost += 1
     
-    def get_ui_row(self):
-        "return (name:str, ip:str, ping_sent: int, pong_recv:str, rtt:str, loss_total: int, outoforder_total:int, corrupt_total:int, ping_recv: str, alarm: bool)"
-        return (self.name, humanize_ip(self.ip), self.ts_ping_sent.get_printable(), self.ts_pong_recv.get_printable(), self.ts_rtt.get_printable(), self.ts_lost.total, self.ts_outoforder_recv.total, self.ts_corrupt_recv.total, self.ts_ping_recv.total, self.is_alarm())
-        
-    def get_prometheus_metrics(self):
-        tags = {'peerip':self.ip,'peer':self.name,'proto':self.proto}
-        return [self.ts_ping_sent.get_prometheus_data('ping_sent', tags),
-               self.ts_ping_recv.get_prometheus_data('ping_recv', tags),
-               self.ts_pong_recv.get_prometheus_data('pong_recv', tags),
-               self.ts_lost.get_prometheus_data('pong_lost', tags),
-               self.ts_corrupt_recv.get_prometheus_data('corrupted_recv', tags),
-               self.ts_outoforder_recv.get_prometheus_data('outoforder', tags),
-               self.ts_rtt.get_prometheus_data('rtt', tags)]
-        
-    def get_report_data(self):
-        return copy.deepcopy({'target_name': self.name, 'sock_remote_ip': self.ip, 'remote_ip': humanize_ip(self.ip) } | self.ts_ping_sent.get_report_data('ping_sent') | self.ts_ping_recv.get_report_data('ping_recv') | 
-                             self.ts_pong_recv.get_report_data('pong_recv') | self.ts_lost.get_report_data('lost') | self.ts_corrupt_recv.get_report_data('corrupt_recv') |
-                             self.ts_outoforder_recv.get_report_data('outoforder_recv') | self.ts_rtt.get_report_data('rtt'))
 
-
-class UDPPing:
-    STATS_INTERVAL_SEC = 15
-    DEFAULT_PKT_LEN = 100
+class UDPPing(Collector):
+    stats: Dict[str,HostStats]
+    stats_lock: Lock
+    stop_flag: Event
+    rx_thread4: Optional[Thread]
+    rx_thread6: Optional[Thread]
+    rx_processor_thread: Thread
+    tx_thread: Thread
+    p_thread: Thread
+    rxq: queue.Queue
+    port: int
+    tx_interval_sec: float
+    stats_interval_sec: float
+    sock4: Optional[socket.socket]
+    sock6: Optional[socket.socket]
+    last_pktid: int = 0
+    txlen: int = 100
 
     HEADER = struct.Struct('!cxxxQII') # [type: byte, pad, pad, pad, pktid: ulonglong, len: uint, csum: uint]
     MAX_PKTID = (2**64)-1
     PKT_TYPE_PING = b'P'
     PKT_TYPE_PONG = b'R'
+    PKT_TYPE_PONG_CORRUPTED_DATA = b'C'
 
     @staticmethod
     def csum(data: bytes) -> int:
@@ -361,247 +207,258 @@ class UDPPing:
         return cls.HEADER.pack(cls.PKT_TYPE_PING, pktid, len(data), cls.csum(data)) + data
 
     @classmethod
-    def decode_packet(cls, data: bytes) -> Tuple[str, int, int, bool]: # op, pktid, len, data_corrupted
+    def decode_packet(cls, data: bytes) -> Tuple[str, int, int, int, bytes]: # op, pktid, len, rcsum, data
         op, pktid, plen, rcsum = cls.HEADER.unpack_from(data)
         data = data[cls.HEADER.size:]
-        if len(data) != plen or cls.csum(data) != rcsum:
-            return op, pktid, data, True
-        else:
-            return op, pktid, data, False
+        return op, pktid, plen, rcsum, data
 
     @classmethod
-    def gen_pong(cls, pid, data):
-        return cls.HEADER.pack(cls.PKT_TYPE_PONG, pid, len(data), cls.csum(data)) + data
+    def verify_packet(cls, data: bytes, plen: int, rcsum: int):
+        if len(data) == plen and cls.csum(data) == rcsum:
+            return True
+        else:
+            return False
 
+    @classmethod
+    def gen_pong(cls, pid, data, recv_ok=False):
+        return cls.HEADER.pack(cls.PKT_TYPE_PONG if recv_ok else cls.PKT_TYPE_PONG_CORRUPTED_DATA, pid, len(data), cls.csum(data)) + data
+    
+    def __init__(self):
+        self.stats = {}
+        self.stats_lock = Lock()
+        self.stop_flag = Event()
+        self.rxq = queue.Queue()
+    
+    def _expire_targets_unsafe(self):
+        to_cleanup = []
+        for tk in self.stats:
+            if self.stats[tk].is_expired():
+                to_cleanup.append(tk)
+        for tk in to_cleanup:
+            self.stats.pop(tk)
 
-
-    lock: threading.Lock
-    stop: threading.Event
-    recvqueue: queue.Queue
-    listen_ipaddr: str
-    port: int
-    timeout_sec: int
-    txlen: int
-
-    status: Dict[str, UDPPingHostData]
-    pending: Dict[int,Tuple[str, float]] # {pktid: (ipaddress, send_time)}
-    last_pktid: int
-
-    targets: Dict[str,str] # { ipaddresses : name }
-    interval: float
-
-    t_recv: threading.Thread =None
-    t_initiator: threading.Thread =None
-    t_rxproc: threading.Thread =None
-    t_periodic: threading.Thread =None
-
-
-    def __init__(self, listen_ipaddr: str, port: int, interval: float =0.2, timeout_sec: float =5):
-        self.lock = threading.RLock()
-        self.stop = threading.Event()
-        self.recvqueue = queue.Queue()
-        self.listen_ipaddr = listen_ipaddr
-        self.port = port
-        self.status = {}
-        self.pending = {}
-        self.last_pktid = 0
-        self.targets = {}
-        self.interval = interval
-        self.timeout_sec = timeout_sec
-        self.txlen = self.DEFAULT_PKT_LEN
-
-        #self.proto = 4 if ipaddress.ip_address(ip).ipv4_mapped != None else 6
-
-    def set_targets(self, tgts: Dict[str,str]): # {ipaddress: name}
-        with self.lock:
-            self.target = {}
-            for t in tgts:
-                if ipaddress.ip_address(t).version == 4:
-                    self.targets['::ffff:'+str(t)] = tgts[t]
+    def set_targets(self, tgts: List[IPv4Address|IPv6Address|str]):
+        stgts = set([ip_address(t) for t in tgts])
+        with self.stats_lock:
+            for t in stgts:
+                if str(t) in self.stats:
+                    self.stats[str(t)]._active = True
                 else:
-                    self.targets[str(t)] = tgts[t]
+                    self.stats[str(t)] = HostStats(t.version, active=True, interval_sec=self.tx_interval_sec)
 
+            for tk in self.stats:
+                if not ip_address(tk) in stgts:
+                    self.stats[tk]._active = False
 
-    def set_txlen(self, txlen=100):
-        self.txlen = txlen
+            self._expire_targets_unsafe()
+
+    def _rx(self, sock: socket.socket, afi: int):
+        try:
+            logging.debug("_receiver_loop up")
+            while not self.stop_flag.is_set():
+                try:
+                    data, addr = sock.recvfrom(65535)
+                except TimeoutError:
+                    continue
+            
+                rtime = time.time()
+
+                sip, sport = addr[0:2] # addr from IPv6 recvfrom can contain extra parameters
+                try:
+                    op, pktid, plen, rcsum, payload = self.decode_packet(data)
+                    payload_ok = self.verify_packet(payload, plen, rcsum)
+                except struct.error as e:
+                    self.rxq.put((afi, rtime, sip, sport, None, None, False, e))
+                    continue
+
+                if op == self.PKT_TYPE_PING:
+                    sock.sendto(self.gen_pong(pktid, payload, payload_ok), (sip, sport))
+
+                self.rxq.put((afi, rtime, sip, sport, op, pktid, payload_ok, None))
+        except:
+            logging.exception("_receiver_loop exception:")
+            raise
+
+    def _rx_processor(self):
+        while not self.stop_flag.is_set():
+            try:
+                afi, rtime, sip, sport, op, pktid, payload_ok, exc = self.rxq.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            with self.stats_lock:
+                if not sip in self.stats:
+                    self.stats[sip] = HostStats(afi)
+
+                if op == self.PKT_TYPE_PING:
+                    self.stats[sip].ping_rx(rtime, payload_ok)
+                elif op == self.PKT_TYPE_PONG:
+                    self.stats[sip].pong_rx(rtime, pktid, payload_ok)
+                elif op == None:
+                    self.stats[sip].malformed_rx(rtime, exc)
 
     def _gen_pktid_unsafe(self):
         self.last_pktid += 1
         if self.last_pktid >= self.MAX_PKTID:
             self.last_pktid = 0
         return self.last_pktid
-        
-    
-    def _receiver_loop(self):
-        try:
-            logging.debug("_receiver_loop up")
-            while not self.stop.isSet():
-                try:
-                    data, addr = self.sock.recvfrom(65535)
-                except TimeoutError:
-                    continue
-            
-                rtime = time.perf_counter()
 
-                sip, sport, _, _ = addr
-                try:
-                    op, pktid, payload, corrupted = self.decode_packet(data)
-                except Exception as e:
-                    logging.exception(f"Can not decode packet from {sip}")
-                    self.recvqueue.put((rtime, sip, sport, None, None, True))
-                    continue
-                
-                if op == self.PKT_TYPE_PING:
-                    self.sock.sendto(self.gen_pong(pktid, payload), (sip, sport))
-
-                self.recvqueue.put((rtime, sip, sport, op, pktid, corrupted))
-        except:
-            logging.exception("_receiver_loop exception:")
-            raise
-
-    def _pkt_processor_loop(self):
-        try:
-            logging.debug("_pkt_processor_loop up")
-            while not self.stop.isSet():
-                try:
-                    rtime, sip, sport, op, pktid, corrupted = self.recvqueue.get(timeout=1)
-                except queue.Empty:
-                    continue
-
-                with self.lock:
-                    if not sip in self.status:
-                        self.status[sip] = UDPPingHostData(sip, self.targets.get(sip, "only-rx"))
-
-                    if corrupted:
-                        self.status[sip].recv_malformed(rtime, sip, sport)
-                        if pktid != None:
-                            self.pending.pop(pktid, None)
-                    elif op == self.PKT_TYPE_PING:
-                        self.status[sip].recv_ping(rtime, pktid, sip, sport)
-                    elif op == self.PKT_TYPE_PONG:
-                        txip, txtime = self.pending.pop(pktid, (None,None))
-                        self.status[sip].recv_pong(rtime, pktid, sip, sport, txip, txtime)
-                    else:
-                        self.status[sip].recv_malformed(rtime, sip, sport)
-
-                self.recvqueue.task_done()
-        except:
-            logging.exception("_pkt_processor_loop exception:")
-            raise
-
-    def _initiator_loop(self):
+    def _tx(self):
         logging.debug("_initiator_loop up")
-        while not self.stop.isSet():
+        while not self.stop_flag.is_set():
             try:
-                with self.lock:
-                    for dip in self.targets:
-                        if not dip in self.status:
-                            self.status[dip] = UDPPingHostData(dip, self.targets[dip])
+                with self.stats_lock:
+                    for dip in self.stats:
+                        t = self.stats[dip]
                         pktid = self._gen_pktid_unsafe()
-                        txtime = time.perf_counter()
-                        self.pending[pktid] = (dip, txtime)
+                        txtime = time.time()
 
-                        self.sock.sendto(self.gen_ping(pktid, self.txlen, False),(dip, self.port))
+                        try:
+                            if t._afi == 4 and self.sock4:
+                                self.sock4.sendto(self.gen_ping(pktid, self.txlen, False),(dip, self.port))
+                            elif t._afi == 6 and self.sock6:
+                                self.sock6.sendto(self.gen_ping(pktid, self.txlen, False),(dip, self.port))
+                            else:
+                                t.failed_tx(txtime, pktid)
+                        except OSError:
+                            logging.exception("_initiator_loop send exception:")
+                            t.failed_tx(txtime, pktid)
 
-                        self.status[dip].sent_ping(txtime, pktid, self.txlen)
+                        self.stats[dip].ping_tx(txtime, pktid, self.txlen)
 
-                time.sleep(self.interval)
-            except OSError:
-                logging.exception("_initiator_loop will recover in 5 sec from exception:")
-                time.sleep(5)
+                time.sleep(self.tx_interval_sec)
             except:
                 logging.exception("_initiator_loop exception:")
                 raise
 
-    def _periodic_loop(self):
+    def _periodic(self):
+        while not self.stop_flag.is_set():
+            try:
+                with self.stats_lock:
+                    self._expire_targets_unsafe()
+
+                    for t in self.stats:
+                        self.stats[t].periodic_update()
+            except Exception as e:
+                logging.exception("_periodic")
+                raise
+
+            time.sleep(self.stats_interval_sec)
+
+    
+    def start(self, bind_address4: Optional[str], bind_address6: Optional[str], port: int, tx_interval_sec: float = 0.5, stats_interval_sec: float = 15):
+        self.port = port
+        self.tx_interval_sec = tx_interval_sec
+        self.stats_interval_sec = stats_interval_sec
+
+        if bind_address4:
+            self.sock4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock4.settimeout(1)
+            self.sock4.bind((bind_address4, port))
+
+            self.rx_thread4 = Thread(target=lambda: self._rx(self.sock4, 4), name='udpping_rx')#, daemon=True)
+            self.rx_thread4.start()
+        else:
+            self.sock4 = None
+            self.rx_thread4 = None
+
+        if bind_address6:
+            self.sock6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            self.sock6.settimeout(1)
+            self.sock6.bind((bind_address6, port))
+
+            self.rx_thread6 = Thread(target=lambda: self._rx(self.sock6, 6), name='udpping_rx')#, daemon=True)
+            self.rx_thread6.start()
+        else:
+            self.sock6 = None
+            self.rx_thread6 = None
+
+        self.rx_processor_thread = Thread(target=self._rx_processor, name='udpping_update')#, daemon=True)
+        self.rx_processor_thread.start()
+
+        self.tx_thread = Thread(target=self._tx, name='udpping_update')#, daemon=True)
+        self.tx_thread.start()
+
+        self.p_thread = Thread(target=self._periodic, name='udpping_periodic')#, daemon=True)
+        self.p_thread.start()
+    
+    def stop(self):
+        self.stop_flag.set()
+
         try:
-            logging.debug("_periodic_loop up")
-            last_t = time.time()
-            while not self.stop.isSet():
-                time.sleep(1)
-
-                t = time.perf_counter()
-                remove_pktids = []
-                remove_stats = []
-                with self.lock:
-                    for pktid in self.pending:
-                         txip, txtime = self.pending[pktid]
-                         if t > txtime + self.timeout_sec:
-                             self.status[txip].timeout(pktid, txip)
-                             remove_pktids.append(pktid)
-                    for rpktid in remove_pktids:
-                        self.pending.pop(rpktid, None)
-                    
-                    if time.time() < last_t + self.STATS_INTERVAL_SEC:
-                        continue
-                    else:
-                        last_t = time.time()
-                    # run the rest only every STATS_INTERVAL_SEC
-                    for s in self.status:
-                        if self.status[s].update_stats():
-                            remove_stats.append(s)
-                    for rs in remove_stats:
-                        self.status.pop(s, None)
-
-                logging.debug(f"udpping state: last_pktid: {self.last_pktid} status_length: {len(self.status)} stop: {self.stop.isSet()} initiator_alive: {self.t_initiator.is_alive()} recv_alive: {self.t_recv.is_alive()} rxproc_alive: {self.t_rxproc.is_alive()} periodic_alive: {self.t_periodic.is_alive()}")
+            self.tx_thread.join()
         except:
-            logging.exception("_peridic_loop exception:")
-            raise
+            pass
 
+        if self.sock4:
+            self.sock4.close()
+        if self.sock6:
+            self.sock6.close()
 
-    def start(self) -> None:
-        logging.debug("UDPPing starting up")
-        self.sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        self.sock.settimeout(1)
-        self.sock.bind((self.listen_ipaddr, self.port))
+        try:
+            if self.rx_thread4:
+                self.rx_thread4.join()
+        except:
+            pass
+        try:
+            if self.rx_thread6:
+                self.rx_thread6.join()
+        except:
+            pass
+        try:
+            self.rx_processor_thread.join()
+        except:
+            pass
+        try:
+            self.p_thread.join()
+        except:
+            pass
 
-        self.t_recv = threading.Thread(target=self._receiver_loop)
-        self.t_recv.start()
+    def get_stats(self) -> Dict[str, HostStats]:
+        with self.stats_lock:
+            return deepcopy(self.stats)
 
-        self.t_initiator = threading.Thread(target=self._initiator_loop)
-        self.t_initiator.start()
-
-        self.t_rxproc = threading.Thread(target=self._pkt_processor_loop)
-        self.t_rxproc.start()
-
-        self.t_periodic = threading.Thread(target=self._periodic_loop)
-        self.t_periodic.start()
-        logging.debug("UDPPing up and running")
-
-    def terminate(self) -> None:
-        logging.debug("udpping stop called")
-        self.stop.set()
-        self.t_initiator.join()
-        logging.debug("joined t_initiator")
-        self.t_recv.join()
-        logging.debug("joined t_recv")
+    def get_stats_dict(self) -> Dict[str, Dict[str, int|float]]:
+        with self.stats_lock:
+            return {t: self.stats[t].to_dict() for t in self.stats}
         
-        self.sock.close()
+    def get_peerstats_dict(self) -> Dict[str,PeerStats]:
+        with self.stats_lock:
+            return {t: self.stats[t].to_peer_stats() for t in self.stats}
 
-        self.t_rxproc.join()
-        logging.debug("joined t_rxproc")
-        self.t_periodic.join()
-        logging.debug("joined t_periodic")
-    
-    def get_ui_rows(self, offset: int =0, limit: int =None): #-> List[Tuple[...]]:
-        with self.lock:
-            ks = sorted(list(self.status.keys()))
-            if limit and offset+limit < len(ks):
-                ks = ks[offset:offset+limit]
+    def collect(self):
+        output = {}
+        for k in HostStats.get_stats_list():
+            if 'total' in k:
+                output[k] = CounterMetricFamily(k, f'Telephant Counter {k}', labels=['tgt'])
             else:
-                ks = ks[offset:]
-            for s in ks:
-                yield self.status[s].get_ui_row()
+                output[k] = GaugeMetricFamily(k, f'Telephant Gauge {k}', labels=['tgt'])
+        
+        for t in self.stats:
+            tkdict = self.stats[t].to_dict()
+            for k in tkdict:
+                output[k].add_metric([t], tkdict[k] if tkdict[k] != None else 0)
+
+        for k in output:
+            yield output[k]
     
-    def get_report(self):
-        with self.lock:
-            return {'udpping': {'results' : [self.status[s].get_report_data() for s in self.status], 'tx_data_length_bytes' : self.txlen+self.HEADER.size, 'tx_gap_sec' : self.interval}}
     
-    def get_prometheus_metrics(self):
-        m = []
-        with self.lock:
-            for k in self.status:
-                m += self.status[k].get_prometheus_metrics()
-        logging.debug(f"udpping get_prometheus_metrics returning {len(m)} elements")
-        return m
+def test():
+    try:
+        import ipaddress
+        up = UDPPing()
+        up.set_targets([ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")])
+        up.start('0.0.0.0', '::', 54321)
+        while True:
+            res = up.get_stats()
+            for t in res:
+                print(f"{t:<30} {res[t]}")
+            time.sleep(5)
+    except KeyboardInterrupt:
+        up.stop()
+        raise
+
+
+if __name__ == '__main__':
+    test()

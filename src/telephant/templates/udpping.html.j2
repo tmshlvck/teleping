@@ -1,0 +1,10 @@
+{% extends "base.html.j2" %}
+
+{% block main %}
+  <div class="container" id="content">
+    <div hx-ext="sse" sse-connect="/udptable_updates">
+      <div id="alert" sse-swap="alert"></div>
+      <div class="container my-5" id="udptable" sse-swap="udptable">Loading...</div>
+    </div>
+  </div>
+{% endblock %}
