@@ -29,10 +29,7 @@ def main(config_file, debug):
         logging.basicConfig(level=(logging.DEBUG if tc.cfg.debug else logging.INFO),
                             format='%(asctime)s %(levelname)s %(message)s')
 
-    logging.info("Config read, logging initialized, starting udp responder.")
-    tc.udpping = UDPPing()
-    tc.udpping.start(tc.cfg.udpping.bind_address4, tc.cfg.udpping.bind_address6, tc.cfg.udpping.port, tc.cfg.udpping.interval)
-    tc.udpping.set_targets([t.addr for t in tc.cfg.normalized_targets])
+    tc.start()
 
     logging.info("Starting Prometheus")
     REGISTRY.register(tc.udpping)

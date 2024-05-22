@@ -36,6 +36,8 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import time
+import datetime
 
 
 class UdpTableRow(BaseModel):
@@ -62,6 +64,7 @@ def gen_webui(tc: TelephantCore, title: str):
         except:
             pass
         logging.info('Shutting down FastAPI lifespan')
+        tc.shutdown()
 
     app = FastAPI(lifespan=lifespan)
     j2t = Jinja2Templates(env=Environment(loader=PackageLoader("telephant")))
@@ -107,9 +110,19 @@ def gen_webui(tc: TelephantCore, title: str):
     async def html_landing(request: Request) -> HTMLResponse:
         return j2t.TemplateResponse(request=request, name="udpping.html.j2", context={})
     
+    @app.get('/reconfig')
+    async def html_reconfig(request: Request) -> HTMLResponse:
+        await asyncio.to_thread(tc.reconfig)
+        return j2t.TemplateResponse(request=request, name="message.html.j2", context={"status": "OK", "message": f"Reconfigured at {datetime.datetime.now()}.", "timestamp": str(time.time())})
+    
     @app.get('/api/v1/stats')
     async def api_stats(request: Request) -> Dict[str,PeerStats]:
         return await asyncio.to_thread(tc.udpping.get_peerstats_dict)
+    
+    @app.get('/api/v1/reconfig')
+    async def api_reconfig(request: Request) -> Dict[str,str]:
+        await asyncio.to_thread(tc.reconfig)
+        return {"status": "OK", "timestamp": str(time.time())}
 
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)

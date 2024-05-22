@@ -358,7 +358,9 @@ class UDPPing(Collector):
 
             self.rx_thread4 = Thread(target=lambda: self._rx(self.sock4, 4), name='udpping_rx')#, daemon=True)
             self.rx_thread4.start()
+            logging.info(f"Initialized IPv4 socket on address {bind_address4}")
         else:
+            logging.info(f"Skipped IPv4 socket init")
             self.sock4 = None
             self.rx_thread4 = None
 
@@ -367,10 +369,12 @@ class UDPPing(Collector):
             self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             self.sock6.settimeout(1)
             self.sock6.bind((bind_address6, port))
+            logging.info(f"Initialized IPv6 socket on address {bind_address6}")
 
             self.rx_thread6 = Thread(target=lambda: self._rx(self.sock6, 6), name='udpping_rx')#, daemon=True)
             self.rx_thread6.start()
         else:
+            logging.info(f"Skipped IPv6 socket init")
             self.sock6 = None
             self.rx_thread6 = None
 
@@ -384,6 +388,7 @@ class UDPPing(Collector):
         self.p_thread.start()
     
     def stop(self):
+        logging.info("Initiating UDPPing stop")
         self.stop_flag.set()
 
         try:

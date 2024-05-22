@@ -1,0 +1,9 @@
+{% if status == 'OK' %}
+<div class="alert alert-success" role="alert">
+{% elif context.status == 'error' %}
+<div class="alert alert-danger" role="alert">
+{% else %}
+<div class="alert alert-primary" role="alert">
+{% endif %}
+  {{ message }}
+</div>
