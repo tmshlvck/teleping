@@ -1,3 +1,19 @@
+"""
+WebCRUD (HTMX) library
+
+Copyright (C) 2023-2024 Tomas Hlavacek (tmshlvck@gmail.com)
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
 from datetime import date
 
 from fastapi import FastAPI, Form, Depends, Request
@@ -23,30 +39,48 @@ class TableCol:
     element: str = 'td'
 
 @dataclass
-class TableColFormater:
+class TableRow:
+    cols: List[TableCol]
+    row_class: Optional[str] = None
+    element: str = 'tr'
+
+@dataclass
+class TableColFormatter:
     property: str
     format: Optional[str] = None
+    formatter: Optional[Callable[[BaseModel], str]] = None
     preformat: bool = False
 
 class ListTable:
+    ROW_CLASS_DEFAULT = "table-default"
+    ROW_CLASS_PRIMARY = "table-primary"
+    ROW_CLASS_SECONDARY = "table-secondary"
+    ROW_CLASS_SUCCESS = "table-success"
+    ROW_CLASS_DANGER = "table-danger"
+    ROW_CLASS_WARNING = "table-warning"
+    ROW_CLASS_INFO = "table-info"
+
     def __init__(self,
                  model: Type[BaseModel],
-                 columns_format: List[TableColFormater]):
+                 columns_format: List[TableColFormatter],
+                 row_classifier: Optional[Callable[[BaseModel], Optional[str]]] = None):
         self.model = model
         self.columns_format = columns_format
+        self.row_classifier = row_classifier
 
-    def _render_row(self, idx: int, record: BaseModel):
-        def format_col(tcf: TableColFormater, row: Dict[str, Any]):
-            if tcf.format == None:
-                return TableCol(content=str(row[tcf.property]), preformat=tcf.preformat)
+    def _render_cols(self, idx: int, record: BaseModel) -> Generator[TableCol, None, None]:
+        for tcf in self.columns_format:
+            if tcf.formatter != None:
+                yield TableCol(content=tcf.formatter(record), preformat=tcf.preformat)
             else:
-                try:
-                    return TableCol(content=tcf.format.format(**row), preformat=tcf.preformat)
-                except:
-                    return TableCol(content=str(row[tcf.property]), preformat=tcf.preformat)
-        
-        dr = record.model_dump()
-        return [format_col(f, dr) for f in self.columns_format]
+                row = record.model_dump()
+                if tcf.format != None:
+                    try:
+                        yield TableCol(content=tcf.format.format(**row), preformat=tcf.preformat)
+                    except:
+                        yield TableCol(content=str(row[tcf.property]), preformat=tcf.preformat)
+                else:
+                    yield TableCol(content=str(row[tcf.property]), preformat=tcf.preformat)
     
     def _get_header(self):
         jsch = self.model.model_json_schema()
@@ -57,9 +91,15 @@ class ListTable:
                 yield cf.property
 
     def render(self, request: Request, data: List[BaseModel], **ctx) -> str:
-        return j2env.get_template("table.html.j2").render(header=self._get_header(),
-                                                          rows=[self._render_row(idx, r) for idx,r in enumerate(data)],
-                                                          **ctx)
+        def gen_rows(data):
+            for idx,record in enumerate(data):
+                if self.row_classifier:
+                    row_class = self.row_classifier(record)
+                else:
+                    row_class = None
+                yield TableRow(cols=self._render_cols(idx, record), row_class=row_class)
+        
+        return j2env.get_template("table.html.j2").render(header=self._get_header(), rows=gen_rows(data), **ctx)
     
     def deploy(self, app, data: List[BaseModel], url_base: str, refresh_seconds: int = None):
         refresh = None if refresh_seconds == None else {'url': url_base, 'secs': refresh_seconds}
@@ -343,16 +383,26 @@ class ListStructForm(StructForm):
         
 
 class CRUDListTable(ListTable):
-    def _render_row(self, idx: int, record: BaseModel, url_base: str):
-        return super()._render_row(idx, record) + [
+    def _render_cols(self, idx: int, record: BaseModel, url_base: str):
+        return super()._render_cols(idx, record) + [
             StructFormButton(id=f'tab_edit_{idx}', label='Edit', url=f'{url_base}/edit/{idx}'),
             StructFormDelButton(id=f'tab_edit_{idx}', label='Delete', url=f'{url_base}/del/{idx}')]
         
     def render(self, request: Request, data: List[BaseModel], url_base: str) -> str:
+        def gen_rows(data):
+            for idx,record in enumerate(data):
+                if self.row_classifier:
+                    row_class = self.row_classifier(record)
+                else:
+                    row_class = None
+
+                yield TableRow(cols=self._render_cols(idx, record, url_base), row_class=row_class)
+        
+        add_button = StructFormButton(id='tab_add', label='+', url=f'{url_base}/edit/{len(data)}')
+
         return j2env.get_template("table.html.j2").render(header=list(self._get_header())+['', ''],
-                                                          rows=[self._render_row(idx, r, url_base) for idx,r in enumerate(data)],
-                                                          extra=StructFormButton(id='tab_add', label='+',
-                                                                                 url=f'{url_base}/edit/{len(data)}'))
+                                                          rows=gen_rows(data),
+                                                          extra=add_button)
 
     def deploy(self, app, data: List[BaseModel], url_base: str):
         @app.get(url_base)
@@ -437,7 +487,7 @@ def tests(*_):
 
     nums = []
     ssetable = SSEBroadcast()
-    rtable = ListTable(NumRecord, [TableColFormater('x'), TableColFormater('y'), TableColFormater('z')])
+    rtable = ListTable(NumRecord, [TableColFormatter('x'), TableColFormatter('y'), TableColFormatter('z')])
 
     async def send_updates():
         while True:
@@ -487,7 +537,7 @@ def tests(*_):
         pprint.pprint(await request.form())
         return await get_landing()
 
-    utable = CRUDListTable(User, [TableColFormater('id'), TableColFormater('name'), TableColFormater('geek')])
+    utable = CRUDListTable(User, [TableColFormatter('id'), TableColFormatter('name'), TableColFormatter('geek')])
     utable.deploy(app, users, '/users')
 
     rtable.deploy(app, nums, '/rtable', refresh_seconds=10)

@@ -22,81 +22,150 @@ import struct
 from threading import Thread, Lock, Event
 import queue
 from ipaddress import IPv4Address, IPv6Address, ip_address
-from copy import deepcopy
 import socket
 import time
 import os
 import math
 from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily
 from prometheus_client.registry import Collector
-from pydantic import BaseModel
+from collections import deque
 
 
-class PeerStats(BaseModel):
-    last_rx_time: float
-    total_tx_ping: int
-    total_rx_ping_ok: int
-    total_rx_ping_corrupt: int
-    total_rx_pong_ok: int
-    total_rx_pong_corrupt: int
-    total_rx_malformed: int
-    total_lost: int
-    rtt_avg15s_ms: Optional[float]
 
-
-class HostStats:
-    EXPIRY_THRESHOLD_SEC = 60
-
-    _afi: int
-    _active: bool
-    _interval_sec: float
-    _ping_timeout_sec: float
-
-    last_rx_time: float
-    total_tx_ping: int
-    total_rx_ping_ok: int
-    total_rx_ping_corrupt: int
-    total_rx_pong_ok: int
-    total_rx_pong_corrupt: int
-    total_rx_malformed: int
-    total_lost: int
-
-    _pending: Dict[int,float]
-
-    _rtt: List[float]
-    rtt_avg15s_ms: Optional[float]
+class RunningAvg:
+    _qsize: int
+    _queue: deque[float]
+    mean: float
+    variance: float
 
     __slots__ = tuple(__annotations__)
 
-    def __init__(self, afi: int, active: bool = False, ping_timeout_sec: float = 5, interval_sec: float = 1):
+    def __init__(self, window_sec: float = 15, update_interval_sec: float = 1):
+        self._qsize = math.ceil(float(window_sec)/update_interval_sec)
+        self._queue = deque([0.0] * self._qsize, maxlen=self._qsize)
+        self.mean = 0.0
+        self.variance = 0.0
+
+    def update(self, value: float):
+        prev_mean = self.mean
+        oldest_value = self._queue[0]
+        self.mean = prev_mean + (value - oldest_value) / self._qsize
+        self._queue.append(value)
+        self.variance += (value - oldest_value) * ((value - self.mean) + (oldest_value - prev_mean)) / (self._qsize - 1)
+
+    @property
+    def sdev(self):
+        return math.sqrt(self.variance)
+
+
+class RunningFract:
+    _evqueue: deque[float]
+    _subqueue: deque[float]
+
+    __slots__ = tuple(__annotations__)
+
+    def __init__(self, window_sec: float = 15, update_interval_sec: float = 1):
+        qsize = math.ceil(float(window_sec)/update_interval_sec)
+        self._evqueue = deque([0.0] * qsize, maxlen=qsize)
+        self._subqueue = deque([0.0] * qsize, maxlen=qsize+1)
+
+    def event(self, value: float = 1):
+        self._evqueue.append(value)
+        self._subqueue.append(0)
+
+    def subevent(self, value: float = 1):
+        self._subqueue[-1] = value
+
+    @property
+    def mean(self):
+        #print(f'{self._evqueue=} {self._subqueue=}')
+        seq = sum(self._evqueue)
+        ssq = sum(self._subqueue)
+
+        if seq == 0:
+            return 0
+        elif float(ssq) / seq > 1:
+            return 1.0
+        else:
+            return float(ssq) / seq
+
+
+
+
+class HostContext:
+    EXPIRY_THRESHOLD_SEC = 60
+    PING_TIMEOUT_SEC = 5
+
+    _host: str
+    _ip: str
+    _afi: int
+    _active: bool
+    _stats_interval_sec: float
+    _pending: Dict[int,float]
+    _rtt: List[RunningAvg]
+    _loss_rate: List[RunningFract]
+
+    last_rx_time: float
+    total_tx_ping: int
+    total_rx_ping_ok: int
+    total_rx_ping_corrupt: int
+    total_rx_pong_ok: int
+    total_rx_pong_corrupt: int
+    total_rx_malformed: int
+    total_lost: int
+
+    __slots__ = tuple(__annotations__)
+
+    INTERVALS = [15, 60, 300]
+    METRICS = [a for a in __annotations__ if not a.startswith('_')] + [f'rtt_avg_{i}s' for i in INTERVALS] + [f'loss_rate_{i}s' for i in INTERVALS]
+
+    def __init__(self, ip: str, afi: int, active: bool = False, update_interval_sec: float = 1, host: str = None):
+        if host == None:
+            self._host = ip
+        else:
+            self._host = host
+        self._ip = ip
         self._afi = afi
         self._active = active
-        self._interval_sec = interval_sec
-        self._ping_timeout_sec = ping_timeout_sec
-        self.last_rx_time = 0
-        self.total_tx_ping = 0
-        self.total_rx_ping_ok = 0
-        self.total_rx_ping_corrupt = 0
-        self.total_rx_pong_ok = 0
-        self.total_rx_pong_corrupt = 0
-        self.total_rx_malformed = 0
-        self.total_lost = 0
         self._pending = {}
-        self._rtt = []
-        self.rtt_avg15s_ms = None
+        self._rtt = [RunningAvg(i, update_interval_sec) for i in self.INTERVALS]
+        self._loss_rate = [RunningFract(i, update_interval_sec) for i in self.INTERVALS]
 
-    @classmethod
-    def get_stats_list(cls) -> List[str]:
-        return [k for k in cls.__slots__ if not k.startswith('_')]
+        for m in [a for a in self.__annotations__ if not a.startswith('_')]:
+            setattr(self, m, 0)
 
-    def to_dict(self) -> Dict[str,float|int]:
-        return {k:getattr(self, k) for k in self.get_stats_list()}
+    @property
+    def rtt_avg_15s(self):
+        return self._rtt[0].mean
     
-    def to_peer_stats(self) -> PeerStats:
-        return PeerStats(**(self.to_dict()))
+    @property
+    def rtt_avg_60s(self):
+        return self._rtt[1].mean
+    
+    @property
+    def rtt_avg_300s(self):
+        return self._rtt[2].mean
+    
+    @property
+    def loss_rate_15s(self):
+        return self._loss_rate[0].mean
+    
+    @property
+    def loss_rate_60s(self):
+        return self._loss_rate[1].mean
+    
+    @property
+    def loss_rate_300s(self):
+        return self._loss_rate[2].mean
+    
+    def get_host(self):
+        return self._host
 
-    def __repr__(self) -> str:
-        return f'{self.total_tx_ping=} {self.total_rx_pong_ok=} {self.total_rx_malformed=} {self.total_rx_malformed=}'
+    def get_metrics(self, extended: bool = False) -> Dict[str, int|float]:
+        if extended:
+            return {m: getattr(self, m) for m in self.METRICS} | {'host': self._host, 'ip': self._ip, 'afi': self._afi, 'active': self._active}
+        else:
+            return {m: getattr(self, m) for m in self.METRICS}
 
     def is_expired(self) -> bool:
         return (not self._active and (time.time() - self.last_rx_time) > self.EXPIRY_THRESHOLD_SEC) 
@@ -104,7 +173,8 @@ class HostStats:
     def ping_tx(self, txtime: float, pktid: int, txlen: int):
         self.total_tx_ping += 1
         self._pending[pktid] = txtime
-        #print(f"ping_tx {txtime=} {pktid=} {txlen=}")
+        for l in self._loss_rate:
+            l.event()
 
     def failed_tx(sefl, txtime: float, pktid: int):
         pass
@@ -115,13 +185,13 @@ class HostStats:
             self.total_rx_ping_ok += 1
         else:
             self.total_rx_ping_corrupt += 1
-        #print(f"ping_rx {rtime=} {payload_ok=}")
 
     def pong_rx(self, rtime: float, pktid: int, payload_ok: bool):
         self.last_rx_time = rtime
         if pktid in self._pending:
             rtt = rtime*1000 - self._pending[pktid]*1000
-            self.rtt_update(rtt)
+            for r in self._rtt:
+                r.update(rtt)
             self._pending.pop(pktid)
         else:
             self.total_rx_pong_corrupt += 1
@@ -131,42 +201,26 @@ class HostStats:
             self.total_rx_pong_ok += 1
         else:
             self.total_rx_pong_corrupt += 1
-        #print(f"pong_rx {rtime=} {pktid=} {payload_ok=}")
 
     def malformed_rx(self, rtime: float, exc: Exception):
         self.last_rx_time = rtime
         self.total_rx_malformed += 1
-        #print(f"malformed_rx {rtime=} {exc=}")
-
-    def rtt_update(self, rtt):
-        hsize = math.ceil(float(15)/self._interval_sec)
-        if hsize == 1:
-            self.rtt_avg15s_ms = rtt
-            return
-
-        if self.rtt_avg15s_ms == None:
-            self.rtt_avg15s_ms = rtt
-            self._rtt = [(rtt / hsize)] * hsize
-
-        norm_rtt = rtt / hsize
-        self.rtt_avg15s_ms += norm_rtt
-        self._rtt.append(norm_rtt)
-
-        self.rtt_avg15s_ms -= self._rtt.pop(0)
 
     def periodic_update(self):
         t = time.time()
         to_delete = []
         for p in self._pending:
-            if t - self._pending[p] > self._ping_timeout_sec:
+            if t - self._pending[p] > self.PING_TIMEOUT_SEC:
                 to_delete.append(p)
         for p in to_delete:
             self._pending.pop(p)
             self.total_lost += 1
-    
+            for l in self._loss_rate:
+                l.subevent()
+
 
 class UDPPing(Collector):
-    stats: Dict[str,HostStats]
+    stats: Dict[str, HostContext]
     stats_lock: Lock
     stop_flag: Event
     rx_thread4: Optional[Thread]
@@ -177,7 +231,6 @@ class UDPPing(Collector):
     rxq: queue.Queue
     port: int
     tx_interval_sec: float
-    stats_interval_sec: float
     sock4: Optional[socket.socket]
     sock6: Optional[socket.socket]
     last_pktid: int = 0
@@ -237,17 +290,17 @@ class UDPPing(Collector):
         for tk in to_cleanup:
             self.stats.pop(tk)
 
-    def set_targets(self, tgts: List[IPv4Address|IPv6Address|str]):
-        stgts = set([ip_address(t) for t in tgts])
+    def set_targets(self, tgts: Dict[IPv4Address|IPv6Address|str, str]):
+        normtgts = {ip_address(tk) : v for tk, v in tgts.items()}
         with self.stats_lock:
-            for t in stgts:
+            for t,h in normtgts.items():
                 if str(t) in self.stats:
                     self.stats[str(t)]._active = True
                 else:
-                    self.stats[str(t)] = HostStats(t.version, active=True, interval_sec=self.tx_interval_sec)
+                    self.stats[str(t)] = HostContext(str(t), t.version, active=True, update_interval_sec=self.tx_interval_sec, host=h)
 
             for tk in self.stats:
-                if not ip_address(tk) in stgts:
+                if not ip_address(tk) in tgts:
                     self.stats[tk]._active = False
 
             self._expire_targets_unsafe()
@@ -288,7 +341,7 @@ class UDPPing(Collector):
 
             with self.stats_lock:
                 if not sip in self.stats:
-                    self.stats[sip] = HostStats(afi)
+                    self.stats[sip] = HostContext(sip, afi)
 
                 if op == self.PKT_TYPE_PING:
                     self.stats[sip].ping_rx(rtime, payload_ok)
@@ -343,13 +396,12 @@ class UDPPing(Collector):
                 logging.exception("_periodic")
                 raise
 
-            time.sleep(self.stats_interval_sec)
+            time.sleep(self.tx_interval_sec)
 
     
-    def start(self, bind_address4: Optional[str], bind_address6: Optional[str], port: int, tx_interval_sec: float = 0.5, stats_interval_sec: float = 15):
+    def start(self, bind_address4: Optional[str], bind_address6: Optional[str], port: int, tx_interval_sec: float = 1):
         self.port = port
         self.tx_interval_sec = tx_interval_sec
-        self.stats_interval_sec = stats_interval_sec
 
         if bind_address4:
             self.sock4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -420,34 +472,27 @@ class UDPPing(Collector):
         except:
             pass
 
-    def get_stats(self) -> Dict[str, HostStats]:
-        with self.stats_lock:
-            return deepcopy(self.stats)
-
-    def get_stats_dict(self) -> Dict[str, Dict[str, int|float]]:
-        with self.stats_lock:
-            return {t: self.stats[t].to_dict() for t in self.stats}
-        
-    def get_peerstats_dict(self) -> Dict[str,PeerStats]:
-        with self.stats_lock:
-            return {t: self.stats[t].to_peer_stats() for t in self.stats}
-
     def collect(self):
         output = {}
-        for k in HostStats.get_stats_list():
+        for k in HostContext.METRICS:
             if 'total' in k:
-                output[k] = CounterMetricFamily(k, f'Telephant Counter {k}', labels=['tgt'])
+                output[k] = CounterMetricFamily(k, f'Counter {k}', labels=['tgtip', 'tgtname'])
             else:
-                output[k] = GaugeMetricFamily(k, f'Telephant Gauge {k}', labels=['tgt'])
+                output[k] = GaugeMetricFamily(k, f'Gauge {k}', labels=['tgtip', 'tgtname'])
         
-        for t in self.stats:
-            tkdict = self.stats[t].to_dict()
-            for k in tkdict:
-                output[k].add_metric([t], tkdict[k] if tkdict[k] != None else 0)
+        with self.stats_lock:
+            for tip,hc in self.stats.items():
+                md = hc.get_metrics()
+                for k in md:
+                    output[k].add_metric([tip, hc.get_host()], md[k] if md[k] != None else 0)
 
         for k in output:
             yield output[k]
-    
+
+    def get_hostmetrics(self, extended: bool = False) -> Dict[str, Dict[str, int|float|str]]:
+        with self.stats_lock:
+            return {h: self.stats[h].get_metrics(extended) for h in self.stats}
+        
     
 def test():
     try:

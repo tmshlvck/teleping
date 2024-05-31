@@ -9,8 +9,12 @@
     </thead>
     <tbody>
 {% for r in rows %}
+{% if r.row_class %}
+      <tr class="{{ r.row_class }}">
+{% else %}
       <tr class="table-default">
-{% for c in r %}
+{% endif %}
+{% for c in r.cols %}
 {% if c.element == "button" %}
         <td><button type="button" id="{{ c.id }}" class="btn btn-primary" hx-get="{{ c.url }}" hx-target="#wctable" hx-swap="outerHTML">{{ c.label }}</button></td>
 {% elif c.element == "delbutton" %}

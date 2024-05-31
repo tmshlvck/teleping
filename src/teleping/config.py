@@ -1,7 +1,7 @@
 
 # coding: utf-8
 """
-Telephant config module
+Telephant Ping config module
 
 Copyright (C) 2021-2024 Tomas Hlavacek (tmshlvck@gmail.com)
 
@@ -95,10 +95,10 @@ class Config(BaseModel):
         
         return list(nt)
     
-    @computed_field
-    @cached_property
-    def normalized_targets_by_ip(self) -> Dict[str,NormalizedTarget]:
-        return {str(t.addr): t for t in self.normalized_targets}
+#    @computed_field
+#    @cached_property
+#    def normalized_targets_by_ip(self) -> Dict[str,NormalizedTarget]:
+#        return {str(t.addr): t for t in self.normalized_targets}
 
 def read_config(filename: str):
     with open(filename, 'r') as fh:

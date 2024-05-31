@@ -1,6 +1,6 @@
 # coding: utf-8
 """
-Telephant WebUI
+Telephant Ping WebUI
 
 Copyright (C) 2024 Tomas Hlavacek (tmshlvck@gmail.com)
 
@@ -22,15 +22,13 @@ from sse_starlette.sse import EventSourceResponse
 from fastapi.templating import Jinja2Templates
 from jinja2 import PackageLoader, Environment
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, List, Dict, Any
 import uvicorn
 from prometheus_client import make_asgi_app
 
-from webcrud import ListTable, TableColFormater
+from webcrud import ListTable, TableColFormatter
 
-from telephant.config import NormalizedTarget, Config
-from telephant.common import TelephantCore
-from telephant.udpping import PeerStats
+from teleping.config import NormalizedTarget, Config
 
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
@@ -40,16 +38,32 @@ import time
 import datetime
 
 
-class UdpTableRow(BaseModel):
+class HostData(BaseModel):
     host: str
+    ip: str
+    last_rx_time: float
     total_tx_ping: int
-    total_rx_pong_ok: int
-    total_rx_malformed: int
     total_rx_ping_ok: int
-    rtt_avg15s_ms: Optional[float]
+    total_rx_ping_corrupt: int
+    total_rx_pong_ok: int
+    total_rx_pong_corrupt: int
+    total_rx_malformed: int
+    total_lost: int
+    rtt_avg_15s: float
+    loss_rate_15s: float
+    rtt_avg_60s: float
+    loss_rate_60s: float
+    rtt_avg_300s: float
+    loss_rate_300s: float
+
+def hostdata_row_classifier(d: HostData) -> str:
+    if d.loss_rate_15s > 0.5 or d.loss_rate_60s > 0.5 or d.loss_rate_300s > 0.5:
+        return ListTable.ROW_CLASS_DANGER
+    if d.loss_rate_15s > 0.1 or d.loss_rate_60s > 0.1 or d.loss_rate_300s > 0.1 or d.rtt_avg_15s > 600 or d.rtt_avg_60s > 600 or d.rtt_avg_300s > 600:
+        return ListTable.ROW_CLASS_WARNING
 
 
-def gen_webui(tc: TelephantCore, title: str):
+def gen_webui(tc: Any, title: str):
     async def periodic_update(): 
         while True:
             await asyncio.sleep(5)
@@ -67,25 +81,19 @@ def gen_webui(tc: TelephantCore, title: str):
         tc.shutdown()
 
     app = FastAPI(lifespan=lifespan)
-    j2t = Jinja2Templates(env=Environment(loader=PackageLoader("telephant")))
+    j2t = Jinja2Templates(env=Environment(loader=PackageLoader("teleping")))
 
-    ttable = ListTable(UdpTableRow, [TableColFormater('host'), TableColFormater('total_tx_ping'),
-                                          TableColFormater("total_rx_pong_ok"), TableColFormater('total_rx_malformed'),
-                                          TableColFormater("total_rx_ping_ok"), TableColFormater("rtt_avg15s_ms", format="{rtt_avg15s_ms:.2f}"),])
+    ttable = ListTable(HostData, [TableColFormatter('host'), TableColFormatter('ip', preformat=True), TableColFormatter('total_tx_ping'),
+                                  TableColFormatter("total_rx_pong_ok"), TableColFormatter('total_rx_malformed'),
+                                  TableColFormatter("total_rx_ping_ok"), TableColFormatter("rtt_avg_15s", format="{rtt_avg_15s:.1f}"),
+                                  TableColFormatter("loss_rate_15s", formatter=lambda d: f"{(100*d.loss_rate_15s):.1f}%"), ], row_classifier=hostdata_row_classifier)
 
-    async def get_udptable_rows():
-        stats = await asyncio.to_thread(tc.udpping.get_stats)
-        tgts_by_addr = tc.cfg.normalized_targets_by_ip
-        for tip in stats:
-            if tip in tgts_by_addr and tgts_by_addr[tip].name:
-                host = f'{tgts_by_addr[tip].name} ({tip})'
-            elif tgts_by_addr[tip].host:
-                host = f'{tgts_by_addr[tip].host} ({tip})'
-            else:
-                host = tip
-            yield UdpTableRow(host=host, total_tx_ping=stats[tip].total_tx_ping, total_rx_pong_ok=stats[tip].total_rx_pong_ok,
-                                  total_rx_malformed=stats[tip].total_rx_malformed, total_rx_ping_ok=stats[tip].total_rx_ping_ok,
-                                  rtt_avg15s_ms=stats[tip].rtt_avg15s_ms)
+    async def get_hostdata() -> Dict[str,HostData]:
+        hmet = await asyncio.to_thread(tc.udpping.get_hostmetrics, True)
+        return {h : HostData(**hmet[h]) for h in hmet}
+
+    async def get_udptable_rows() -> List[HostData]:
+        return sorted(list((await get_hostdata()).values()), key=lambda d: d.host)
 
     async def event_generator(request: Request):
         def ev(name: str, data: str):
@@ -94,12 +102,7 @@ def gen_webui(tc: TelephantCore, title: str):
         while True:
             if await request.is_disconnected():
                 break
-            
-            #if True:
-            #  yield ev("alert", f'<div class="alert alert-primary" role="alert" id="alert">A simple primary alert {i}!</div>')
-      
-            yield ev("udptable", ttable.render(request, [r async for r in get_udptable_rows()]))
-            
+            yield ev("udptable", ttable.render(request, list(await get_udptable_rows())))           
             await asyncio.sleep(1.0)  # in seconds
 
     @app.get("/udptable_updates")
@@ -110,14 +113,18 @@ def gen_webui(tc: TelephantCore, title: str):
     async def html_landing(request: Request) -> HTMLResponse:
         return j2t.TemplateResponse(request=request, name="udpping.html.j2", context={})
     
+    #@app.get('/table')
+    #async def html_landing(request: Request) -> HTMLResponse:
+    #    return HTMLResponse(ttable.render(request, list(await get_udptable_rows())))
+    
     @app.get('/reconfig')
     async def html_reconfig(request: Request) -> HTMLResponse:
         await asyncio.to_thread(tc.reconfig)
         return j2t.TemplateResponse(request=request, name="message.html.j2", context={"status": "OK", "message": f"Reconfigured at {datetime.datetime.now()}.", "timestamp": str(time.time())})
     
     @app.get('/api/v1/stats')
-    async def api_stats(request: Request) -> Dict[str,PeerStats]:
-        return await asyncio.to_thread(tc.udpping.get_peerstats_dict)
+    async def api_stats(request: Request) -> Dict[str,HostData]:
+        return await get_hostdata()
     
     @app.get('/api/v1/reconfig')
     async def api_reconfig(request: Request) -> Dict[str,str]:
@@ -130,5 +137,5 @@ def gen_webui(tc: TelephantCore, title: str):
     return app
 
 
-def start_webui(tc: TelephantCore):
-    uvicorn.run(gen_webui(tc, 'Telephant'), host=tc.cfg.control.listen, port=tc.cfg.control.port, log_level="debug" if tc.cfg.debug else "info")
+def start_webui(tc: Any):
+    uvicorn.run(gen_webui(tc, 'Telephant Ping'), host=tc.cfg.control.listen, port=tc.cfg.control.port, log_level="debug" if tc.cfg.debug else "info")

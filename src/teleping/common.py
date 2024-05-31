@@ -1,6 +1,6 @@
 # coding: utf-8
 """
-Telephant common module
+Telephant Ping common module
 
 Copyright (C) 2021-2023 Tomas Hlavacek (tmshlvck@gmail.com)
 
@@ -16,27 +16,15 @@ this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import logging
-
-import sys
-import os
 import subprocess
 import shutil
 import traceback
 import json
 import ipaddress
-import yaml
-import logging
-import datetime
-import socket
-import requests
-import threading
-import time
+
 
 from typing import Any, Dict, List, Tuple, Set, Iterator
 from ipaddress import IPv4Address, IPv6Address, ip_address
-
-from telephant.udpping import UDPPing
-from telephant.config import Config, read_config
 
 
 def run_linux_cmd(cmd: List[str]) -> Dict[str, str|int]:
@@ -114,36 +102,4 @@ def run_linux_traceroute(target: str, afi: int =4, max_hops: int =30, wait_sec: 
         return ({'cmd': ' '.join(cmd), 'return_code': process.returncode, 'stdout': stdout.decode(), 'stderr' : stderr.decode()}, hipas)
     except Exception as e:
         return {'cmd': ' '.join(cmd) ,'exception': traceback.format_exc()}, set()
-
-
-
-
-
-class TelephantCore:
-    cfg_filename: str
-    cfg: Config
-    udpping: UDPPing
-
-    __slots__ = tuple(__annotations__)
-
-    def __init__(self, cfg_filename: str):
-        self.cfg_filename = cfg_filename
-        self.cfg = read_config(self.cfg_filename)
-
-    def start(self):
-        logging.info("Config read, logging initialized, starting udp responder and initiator.")
-        self.udpping = UDPPing()
-        self.udpping.start(self.cfg.udpping.bind_address4, self.cfg.udpping.bind_address6, self.cfg.udpping.port, self.cfg.udpping.interval)
-        self.udpping.set_targets([t.addr for t in self.cfg.normalized_targets])
-
-    def shutdown(self):
-        logging.info("Shutting down udp ping.")
-        self.udpping.stop()
-
-    def reconfig(self):
-        logging.info("Reconfig in progress...")
-        self.cfg = read_config(self.cfg_filename)
-        self.udpping.set_targets([t.addr for t in self.cfg.normalized_targets])
-        logging.info("Reconfig finished.")
-        
 

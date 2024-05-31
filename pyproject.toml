@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "telephant"
+name = "teleping"
 version = "0.2.0"
-description = "Network Engineer's best friend - Telephant"
+description = "Network Engineer's best friend - Telephant Ping"
 authors = ["Tomas Hlavacek <tmshlvck@gmail.com>"]
 readme = "README.md"
 include = ["telephant/templates", "webcrud"]
@@ -26,4 +26,4 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-telephant = "telephant:main"
+teleping = "teleping:main"
