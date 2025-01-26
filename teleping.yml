@@ -29,7 +29,3 @@ control:
   listen: '127.0.0.1'
   port: 8081
 
-prometheus_exporter:
-  listen: '::'
-  port: 9123
-

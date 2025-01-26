@@ -73,7 +73,6 @@ class Config(BaseModel):
     targets: Optional[List[Target]] = []
     udpping: UDPPingConfig
     control: HTTPServerConfig
-    prometheus_exporter: HTTPServerConfig
 
     @computed_field
     @cached_property
@@ -104,4 +103,4 @@ def read_config(filename: str):
     with open(filename, 'r') as fh:
         ycf = load(fh.read(), Loader=SafeLoader)
         return Config(**ycf)
-    
+

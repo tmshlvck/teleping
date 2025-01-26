@@ -1,0 +1,11 @@
+[Unit]
+Description=teleping systemd service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/teleping -c /etc/teleping.conf
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
